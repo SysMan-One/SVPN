@@ -5,8 +5,8 @@ CONFIG -= qt
 CONFIG	+= -static
 
 SOURCES += \
-	..\utility_routines.c \
-	..\avproto.c \
+	../avproto.c \
+	../utility_routines.c \
 	svpn_server.c
 
 INCLUDEPATH	+= ..\

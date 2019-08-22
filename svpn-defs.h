@@ -65,10 +65,9 @@ enum	{
 	SVPN$K_TAG_KEEPALIVE,	/* WORD		*/
 	SVPN$K_TAG_TOTAL,	/* WORD		*/
 	SVPN$K_TAG_ENC,		/* OCTET	*/
-	SVPN$K_TAG_TRACE	/* OCTET	*/
+	SVPN$K_TAG_TRACE,	/* OCTET	*/
+	SVPN$K_TAG_MSG		/* ASCII	*/
 };
-
-
 
 #pragma	pack	(push, 1)
 

@@ -1,6 +1,6 @@
 #ifdef _WIN32
-	#pragma once
-	#define WIN32_LEAN_AND_MEAN             // Exclude rarely-used stuff from Windows headers
+        #pragma once
+        #define WIN32_LEAN_AND_MEAN             // Exclude rarely-used stuff from Windows headers
 #endif
 
 /*
@@ -32,13 +32,17 @@
 **	 7-JUN-2018	RRL	Correct pointer type to compile under GCC.
 **
 **	15-OCT-2018	RRL	Added __ASC_TYPE__ macro to flag that ASC type is defined here.
+**
+**	25-JUN-2019	RRL	Redefined macro $TRACE() to eliminate "if (cond) ..."
+**
+**	10-JUL-2019	RRL	Warning fix.
 */
 
 #if _WIN32
 #define _CRT_SECURE_NO_WARNINGS	1
 
-#include		<Windows.h>
-#include		<sys/timeb.h>
+#include	<Windows.h>
+#include	<sys/timeb.h>
 
 #endif
 
@@ -53,6 +57,7 @@ extern "C" {
 #define	__MODULE__	NULL
 #endif
 
+#include	<stdio.h>
 #include	<stddef.h>
 #include	<assert.h>
 #include	<time.h>
@@ -66,7 +71,6 @@ extern "C" {
 #pragma GCC diagnostic ignored  "-Wparentheses"
 #endif
 
-
 #define	CRLFCRLF_LW	0x0a0d0a0d
 #define	CRLFCRLF	"\r\n\r\n"
 #define	CRLF		"\r\n"
@@ -75,10 +79,6 @@ extern "C" {
  * A Macro to compute an arrays size in elements at compilation time
  */
 #define	$ARRSZ(a)	(sizeof(a)/sizeof(a[0]))
-
-
-
-
 
 
 /*
@@ -128,13 +128,23 @@ struct	timespec {
 */
 inline static	int	____time(struct timespec *tv)
 {
+
+#if    1
+
+	timespec_get(tv, TIME_UTC);
+	tv->tv_nsec /=1024;
+	//tv->tv_nsec *=1024;
+#else
 struct _timeb timebuffer;
 
-	_ftime( &timebuffer );
+	_ftime_s ( &timebuffer );
 
 	tv->tv_sec = timebuffer.time;
 	tv->tv_nsec = timebuffer.millitm;
-	tv->tv_nsec *= 1000;
+	tv->tv_nsec *= 1024;
+
+
+#endif // 1
 
 	return	0;
 }
@@ -157,7 +167,7 @@ inline	static void	__util$timbuf(time_t *__src, struct tm * __dst)
 {
 time_t	now;
 
-	if ( !__src )
+        if ( !__src )
 		time(&now);
 
 #ifdef	WIN32
@@ -172,20 +182,20 @@ time_t	now;
 
 
 #ifndef	__PATH_SEPARATOR
-	#ifndef	WIN32
-		#define	__PATH_SEPARATOR	'/'
-	#else
-		#define	__PATH_SEPARATOR	'\\'
-	#endif
+        #ifndef	WIN32
+                #define	__PATH_SEPARATOR	'/'
+        #else
+                #define	__PATH_SEPARATOR	'\\'
+        #endif
 #endif
 
 
 #ifndef	__PATH_SEPARATOR_S
-	#ifndef	WIN32
-		#define	__PATH_SEPARATOR_S	"/"
-	#else
-		#define	__PATH_SEPARATOR_S	"\\"
-	#endif
+        #ifndef	WIN32
+                #define	__PATH_SEPARATOR_S	"/"
+        #else
+                #define	__PATH_SEPARATOR_S	"\\"
+        #endif
 #endif
 
 /*
@@ -195,14 +205,14 @@ time_t	now;
  */
 typedef	struct	__ile2	{
 	unsigned short	code,	/* Item List Element code	*/
-			len;	/* Length of data		*/
-		char *	ptr;	/* Pointer to data		*/
+	                len;	/* Length of data		*/
+	        char *	ptr;	/* Pointer to data		*/
 } ILE2;
 
 typedef	struct	__ile3	{
 	unsigned short	code,	/* Item List Element code	*/
-			len;	/* A size of the buffer		*/
-		char *	ptr;	/* An address of buffer to accept data */
+	                len;	/* A size of the buffer		*/
+	        char *	ptr;	/* An address of buffer to accept data */
 	unsigned short * retlen;/* An actual length of the data returned in the buffer */
 } ILE3;
 
@@ -232,7 +242,7 @@ typedef	struct	__ile3	{
 */
 typedef	struct	__entry	{
 	struct	__entry *left,	/* References (address) to left and right elements in the queue */
-			*right;	/* NULL if the element is first or last in the queue		*/
+	                *right;	/* NULL if the element is first or last in the queue		*/
 	void	*	queue;	/* A link to QUEUE structure					*/
 } ENTRY;
 
@@ -266,7 +276,8 @@ typedef	struct	__queue	{
 
 /* Logging facility	*/
 #ifndef	__FAC__
-	#define	__FAC__	"UTILS"
+        #define	__FAC__	"UTILS"
+        #define	__FAC$_UTILS__	0x01
 #endif
 
 #define STS$K_WARN	0
@@ -279,17 +290,27 @@ typedef	struct	__queue	{
 
 #define $STS_ERROR(code) 	( ((code) & STS$K_ERROR ) || ((code) & STS$K_FATAL) )
 
+/*
+ * +---------------------+--------------------------+-------------------+
+ * |  Facility (16 bits) | Message Number (13 bits) | Severity (3) bits |
+ * +---------------------+--------------------------+-------------------+
+ */
+#define	$FAC(code)		((code) >> 16)
+#define	$MSG(code)		((code) >> 3)
+#define	$SEV(code)		((code) & 0x7)
+
+
 unsigned	__util$log	(const char *fac, unsigned severity, const char *fmt, ...);
 unsigned	__util$logd	(const char *fac, unsigned severity, const char *fmt, const char *mod, const char *func, unsigned line, ...);
 unsigned	__util$log2buf	(void *out, int outsz, int * outlen, const char *fac, unsigned severity, const char *fmt, ...);
 unsigned	__util$syslog	(int fac, int sev, const char *tag, const char *msg, int  msglen);
 
 #ifdef	_DEBUG
-	#define $LOG(severity, fmt, ...)	__util$logd(__FAC__, severity, fmt, __MODULE__, __FUNCTION__ , __LINE__ , ## __VA_ARGS__)
-	#define $IFLOG(f, severity, fmt, ...)	f ? __util$logd(__FAC__, severity, fmt, __MODULE__, __FUNCTION__ , __LINE__ , ## __VA_ARGS__) : severity
+        #define $LOG(severity, fmt, ...)	__util$logd(__FAC__, severity, fmt, __MODULE__, __FUNCTION__ , __LINE__ , ## __VA_ARGS__)
+        #define $IFLOG(f, severity, fmt, ...)	f ? __util$logd(__FAC__, severity, fmt, __MODULE__, __FUNCTION__ , __LINE__ , ## __VA_ARGS__) : severity
 #else
-	#define $LOG(severity, fmt, ...)	__util$log(__FAC__, severity, fmt, ## __VA_ARGS__)
-	#define $IFLOG(f, severity, fmt, ...)	f ? __util$logd(__FAC__, severity, fmt, __MODULE__, __FUNCTION__ , __LINE__ , ## __VA_ARGS__)	: severity
+        #define $LOG(severity, fmt, ...)	__util$log(__FAC__, severity, fmt, ## __VA_ARGS__)
+        #define $IFLOG(f, severity, fmt, ...)	f ? __util$logd(__FAC__, severity, fmt, __MODULE__, __FUNCTION__ , __LINE__ , ## __VA_ARGS__)	: severity
 
 #endif
 
@@ -317,11 +338,11 @@ unsigned i = 0xffffffffU;
 #ifdef	WIN32
 int	status = 0;
 
-	for ( ; i && !(status = TryAcquireSRWLockExclusive((SRWLOCK *) lock)); i--);
+        for ( ; i && !(status = TryAcquireSRWLockExclusive((SRWLOCK *) lock)); i--);
 
 	return	status ? STS$K_SUCCESS : STS$K_FATAL;
 #else
-	for ( ; i && __sync_lock_test_and_set(((int *) lock), 1); i--)
+        for ( ; i && __sync_lock_test_and_set(((int *) lock), 1); i--)
 		for (; i && (* ((int *)lock)); i--);
 
 	return	i ? STS$K_SUCCESS : STS$K_FATAL;
@@ -378,10 +399,10 @@ QUEUE * _que = (QUEUE *) que;
 ENTRY *	_ent;
 int	nums;
 
-	/*
+        /*
 	 * Sanity check
 	 */
-	if ( !_que || !count )
+        if ( !_que || !count )
 		return	STS$K_FATAL;
 
 	if ( !_que->count )
@@ -411,8 +432,6 @@ int	nums;
 }
 
 
-
-
 /*
  * Description: Insert a new entry at tail of the queue
  *
@@ -426,29 +445,34 @@ int	nums;
  * Return:
  *	condition code
  */
+
+#define	UTIL$S_INVARG	0x102
+#define	UTIL$S_INQUE	0x202
+#define	UTIL$S_NOLOCK	0x202
+
 inline static int __util$insqtail (void * que, void * ent, unsigned * count)
 {
 QUEUE * _que = (QUEUE *) que;
 ENTRY *	_entold, *_entnew = (ENTRY *) ent;
 
-	/*
+        /*
 	 * Sanity check
 	 */
-	if ( !_que || !ent || !count )
-		return	STS$K_FATAL;
+        if ( !_que || !ent || !count )
+		return	UTIL$S_INVARG;
 
 	/* Check that ENTRY has not been in the a QUEUE already */
 	if ( _entnew->queue == que )
 		return	STS$K_SUCCESS;	/* Already: in the QUEUE*/
 	else if ( _entnew->queue )	/*    in other QUEUE	*/
-		return	STS$K_FATAL;
+		return	UTIL$S_INQUE;
 
 
 	/*
 	 * Acquire lock
 	 */
 	if ( !(1 & __util$lockspin( &_que->lock)) )
-		return	STS$K_ERROR;
+		return	UTIL$S_NOLOCK;
 
 	*count = _que->count;
 
@@ -487,10 +511,10 @@ inline static int __util$insqhead (void * que, void * ent, unsigned * count)
 QUEUE * _que = (QUEUE *) que;
 ENTRY *	_entold, *_entnew = (ENTRY *) ent;
 
-	/*
+        /*
 	 * Sanity check
 	 */
-	if ( !_que || !ent || !count )
+        if ( !_que || !ent || !count )
 		return	STS$K_FATAL;
 
 	/* Check that ENTRY has not been in the a QUEUE already */
@@ -543,10 +567,10 @@ inline static int __util$remqent (void * que, void *ent, unsigned * count)
 QUEUE * _que = (QUEUE *) que;
 ENTRY *	_ent = (ENTRY *) ent, *_entleft;
 
-	/*
+        /*
 	 * Sanity check
 	 */
-	if ( !_que || !ent || !count )
+        if ( !_que || !ent || !count )
 		return	STS$K_FATAL;
 
 	/* Check that ENTRY is belong to the QUEUE	*/
@@ -560,10 +584,10 @@ ENTRY *	_ent = (ENTRY *) ent, *_entleft;
 		return	STS$K_ERROR;
 
 	if ( !(*count = _que->count) )
-		{
+	        {
 		__util$unlockspin(&_que->lock);
 		return STS$K_SUCCESS;
-		}
+	        }
 
 	/*
 	** Main work ...
@@ -612,10 +636,10 @@ inline static int __util$remqtail (void * que, void **ent, unsigned * count)
 QUEUE * _que = (QUEUE *) que;
 ENTRY *	_entleft, * _entright = NULL;
 
-	/*
+        /*
 	 * Sanity check
 	 */
-	if ( !_que || !ent || !count )
+        if ( !_que || !ent || !count )
 		return	STS$K_FATAL;
 
 	/*
@@ -625,21 +649,21 @@ ENTRY *	_entleft, * _entright = NULL;
 		return	STS$K_ERROR;
 
 	if ( !(*count = _que->count) )
-		{
+	        {
 		__util$unlockspin(&_que->lock);
 		return STS$K_SUCCESS;
-		}
+	        }
 
 	/*
 	** Main work ...
 	*/
 	if ( _entright = _que->tail )
-		{
+	        {
 		if ( _entleft = _entright->left )
 			_entleft->right = NULL;
 
 		_que->tail = _entleft;
-		}
+	        }
 
 	*ent	= _entright;
 	_entright->left = _entright->right = NULL;
@@ -681,10 +705,10 @@ inline static int __util$remqhead (void * que, void **ent, unsigned * count)
 QUEUE * _que = (QUEUE *) que;
 ENTRY *	_entleft = NULL, * _entright;
 
-	/*
+        /*
 	 * Sanity check
 	 */
-	if ( !_que || !ent || !count )
+        if ( !_que || !ent || !count )
 		return	STS$K_FATAL;
 
 	/*
@@ -694,21 +718,21 @@ ENTRY *	_entleft = NULL, * _entright;
 		return	STS$K_ERROR;
 
 	if ( !(*count = _que->count) )
-		{
+	        {
 		__util$unlockspin(&_que->lock);
 		return STS$K_SUCCESS;
-		}
+	        }
 
 	/*
 	** Main work ...
 	*/
 	if ( _entleft = _que->head )
-		{
+	        {
 		if ( _entright = _entleft->right )
 			_entright->left = NULL;
 
 		_que->head = _entright;
-		}
+	        }
 #ifndef	WIN32
 	assert(_entleft);
 #endif
@@ -755,10 +779,10 @@ unsigned	i;
 QUEUE * _que = (QUEUE *) que;
 ENTRY *	entp, * _entleft = NULL, * _entright = NULL;
 
-	/*
+        /*
 	 * Sanity check
 	 */
-	if ( !_que || !ent )
+        if ( !_que || !ent )
 		return	STS$K_FATAL;
 
 	/*
@@ -768,19 +792,19 @@ ENTRY *	entp, * _entleft = NULL, * _entright = NULL;
 		return	STS$K_ERROR;
 
 	if ( !(_que->count) )
-		{
+	        {
 		__util$unlockspin(&_que->lock);
 		return STS$K_SUCCESS;
-		}
+	        }
 
 	/*
 	 * Lookup in the queue an entry with a given address
 	 */
 	for (i = 0, entp = _que->head; i < _que->count; i++, entp = entp->right)
-		{
+	        {
 		if ( entp == (ENTRY *) ent )
 			break;
-		}
+	        }
 
 	/*
 	 * Is the entry already on head of the queue?
@@ -792,10 +816,10 @@ ENTRY *	entp, * _entleft = NULL, * _entright = NULL;
 	 * Is the entry with a given address live in the queue?
 	 */
 	if ( !entp )
-		{
+	        {
 		__util$unlockspin(&_que->lock);
 		return	STS$K_ERROR;
-		}
+	        }
 
 	/*
 	 * Exclude has been found entry from the chain
@@ -842,10 +866,10 @@ unsigned	i;
 QUEUE * _que = (QUEUE *) que;
 ENTRY *	entp, * _entleft = NULL, * _entright = NULL;
 
-	/*
+        /*
 	 * Sanity check
 	 */
-	if ( !_que || !ent )
+        if ( !_que || !ent )
 		return	STS$K_FATAL;
 
 	/*
@@ -855,19 +879,19 @@ ENTRY *	entp, * _entleft = NULL, * _entright = NULL;
 		return	STS$K_ERROR;
 
 	if ( !(_que->count) )
-		{
+	        {
 		__util$unlockspin(&_que->lock);
 		return STS$K_SUCCESS;
-		}
+	        }
 
 	/*
 	 * Lookup in the queue an entry with a given address
 	 */
 	for (i = 0, entp = _que->head; i < _que->count; i++, entp = entp->right)
-		{
+	        {
 		if ( entp == (ENTRY *) ent )
 			break;
-		}
+	        }
 
 	/*
 	 * Is the entry already at tail ?
@@ -879,10 +903,10 @@ ENTRY *	entp, * _entleft = NULL, * _entright = NULL;
 	 * Is the entry with a given address live in the queue?
 	 */
 	if ( !entp )
-		{
+	        {
 		__util$unlockspin(&_que->lock);
 		return	STS$K_ERROR;
-		}
+	        }
 
 	/*
 	 * Exclude has been found entry from the chain
@@ -992,7 +1016,7 @@ inline static int __util$isinrange (int x, int __min__, int __max__ )
 {
 int	left = $MIN(__min__, __max__) , right = $MAX(__min__, __max__);
 
-	return ( (x < left) || ( x > right ) ) ? 0 : 1;
+        return ( (x < left) || ( x > right ) ) ? 0 : 1;
 }
 
 /* Return result of checking value between two borders: min and max	*/
@@ -1006,7 +1030,7 @@ inline static int __util$isinrange2 (int x, int __min__, int __max__ )
 {
 int	left = $MIN(__min__, __max__) , right = $MAX(__min__, __max__);
 
-	return ( (x <= left) || ( x >= right ) ) ? 0 : 1;
+        return ( (x <= left) || ( x >= right ) ) ? 0 : 1;
 }
 
 /* Return result of checking value between two borders: min and max	*/
@@ -1018,7 +1042,7 @@ inline static int __util$range (int x, int	__min__, int __max__ )
 {
 int	left = $MIN(__min__, __max__) , right = $MAX(__min__, __max__);
 
-	x = $MAX(x, left);
+        x = $MAX(x, left);
 	x = $MIN(x, right);
 
 	return	x;
@@ -1052,9 +1076,9 @@ int	left = $MIN(__min__, __max__) , right = $MAX(__min__, __max__);
  *	STS$K_WARN	- the buffer is not zero filled
  */
 inline static int __util$iszero	(
-		void *	bufp,
-		int	bufsz
-			)
+                void *	bufp,
+                int	bufsz
+                        )
 {
 int	i;
 unsigned char *__bufp = (unsigned char *) bufp;
@@ -1063,12 +1087,12 @@ unsigned char *__bufp = (unsigned char *) bufp;
 
 //#pragma message	("%CC-I-ULLONG64, unsigned long long - 64 bits")
 
-	/* Step by 8 octets ... */
-	for (i = bufsz/sizeof(unsigned long long); i; i--, __bufp += sizeof(unsigned long long) )
-		{
+        /* Step by 8 octets ... */
+        for (i = bufsz/sizeof(unsigned long long); i; i--, __bufp += sizeof(unsigned long long) )
+	        {
 		if ( *((unsigned long long *) __bufp ) )
 			return	STS$K_WARN;
-		}
+	        }
 #endif // (sizeof(unsigned long long)) > sizeof(unsigned int long) )
 
 	/* Compute remainder octets in the buffer */
@@ -1076,20 +1100,20 @@ unsigned char *__bufp = (unsigned char *) bufp;
 
 	/* Step by 4 octets ... */
 	for (i = bufsz/sizeof(unsigned int); i; i--, __bufp += sizeof(unsigned int) )
-		{
+	        {
 		if ( *((unsigned int *) __bufp ) )
 			return	STS$K_WARN;
-		}
+	        }
 
 	/* Compute remainder octets in the buffer */
 	bufsz %= sizeof(unsigned int);
 
 	/* Step by 2 octets ... */
 	for (i = bufsz/sizeof(unsigned short); i; i--, __bufp += sizeof(unsigned short) )
-		{
+	        {
 		if ( *((unsigned short *) __bufp ) )
 			return	STS$K_WARN;
-		}
+	        }
 
 	/* Compute remainder octets in the buffer */
 	bufsz %= sizeof(unsigned short);
@@ -1110,14 +1134,14 @@ unsigned char *__bufp = (unsigned char *) bufp;
  *
  */
 inline static int __util$bzero	(
-		void *	bufp,
-		int	bufsz
-			)
+                void *	bufp,
+                int	bufsz
+                        )
 {
 int	i;
 unsigned char *__bufp = (unsigned char *) bufp;
 
-	/*
+        /*
 	 * There is a place for optimization : align a memory address at head
 	 * of the memory block
 	 */
@@ -1126,8 +1150,8 @@ unsigned char *__bufp = (unsigned char *) bufp;
 
 //#pragma message	("%CC-I-ULLONG64, unsigned long long - 64 bits")
 
-	/* Step by 8 octets ... */
-	for (i = bufsz/sizeof(unsigned long long); i; i--, __bufp += sizeof(unsigned long long) )
+        /* Step by 8 octets ... */
+        for (i = bufsz/sizeof(unsigned long long); i; i--, __bufp += sizeof(unsigned long long) )
 		*((unsigned long long *) __bufp ) = 0;
 #endif // (sizeof(unsigned long long)) > sizeof(unsigned int) )
 
@@ -1159,19 +1183,19 @@ unsigned char *__bufp = (unsigned char *) bufp;
 
 
 /* Tracing facility	*/
-void	__util$trace	(const char *fmt, const char *mod, const char *func, unsigned line, ...);
+void	__util$trace	(int cond, const char *fmt, const char *mod, const char *func, unsigned line, ...);
 
 #ifdef	__TRACE__
-	#ifndef	$TRACE
-		#define $TRACE(fmt, ...)	__util$trace(fmt, __MODULE__, __FUNCTION__, __LINE__ , ## __VA_ARGS__)
-	#endif
+        #ifndef	$TRACE
+                #define $TRACE(fmt, ...)	__util$trace(1, fmt, __MODULE__, __FUNCTION__, __LINE__ , ## __VA_ARGS__)
+        #endif
 
-	#ifndef	$IFTRACE
-		#define $IFTRACE(cond, fmt, ...)	if ( (cond) ) __util$trace(fmt, __MODULE__, __FUNCTION__, __LINE__ , ## __VA_ARGS__)
-	#endif
+        #ifndef	$IFTRACE
+                #define $IFTRACE(cond, fmt, ...) __util$trace(cond, fmt, __MODULE__, __FUNCTION__, __LINE__ , ## __VA_ARGS__)
+        #endif
 #else
-	#define $TRACE(fmt, ...)	{}
-	#define $IFTRACE(cond, fmt, ...)	{}
+        #define $TRACE(fmt, ...)	{}
+        #define $IFTRACE(cond, fmt, ...)	{}
 
 #endif
 
@@ -1185,7 +1209,7 @@ typedef	struct _asc
 	unsigned char	len;
 	char	sts[ASC$K_SZ];
 
-	#define	__ASC_TYPE__	1
+        #define	__ASC_TYPE__	1
 } ASC;
 
 
@@ -1200,17 +1224,33 @@ typedef	struct _asc
 
 /* Copying ASCIIZ string to ASCIC container */
 inline static int	__util$str2asc
-			(
-		char *	src,
-		ASC *	dst
-			)
+                        (
+                char *	src,
+                ASC *	dst
+                        )
 {
 	$ASCLEN(dst) = (unsigned char) strnlen(src, ASC$K_SZ);
 	memcpy($ASCPTR(dst), src, $ASCLEN(dst) );
+	dst->sts[dst->len] = '\0';
 
 	return	$ASCLEN(dst);
 }
 
+
+/* Comparing two ASCIC */
+inline static int	__util$cmpasc
+                        (
+                ASC *	s1,
+                ASC *	s2
+                        )
+{
+int	status;
+
+        if ( status = ($ASCLEN(s1) - $ASCLEN(s2)) )
+		return	status;
+
+	return	memcmp($ASCPTR(s1), $ASCPTR(s2), $ASCLEN(s1) );
+}
 
 #define	$DUMPHEX(s,l)	__util$dumphex(__FUNCTION__, __LINE__ , s, l)
 void	__util$dumphex	(char *__fi, unsigned __li, void  * src, unsigned short srclen);
@@ -1223,7 +1263,7 @@ inline static void __util$add_time(struct timespec* time1, struct timespec* time
 time_t sec = time1->tv_sec + time2->tv_sec;
 long nsec = time1->tv_nsec + time2->tv_nsec;
 
-	sec += nsec / 1000000000L;
+        sec += nsec / 1000000000L;
 	nsec = nsec % 1000000000L;
 
 	result_time->tv_sec = sec;
@@ -1254,7 +1294,7 @@ inline static void __util$sub_time(struct timespec * time1, struct timespec* tim
 {
 struct timespec temp;
 
-	temp.tv_sec = time1->tv_sec - time2->tv_sec;
+        temp.tv_sec = time1->tv_sec - time2->tv_sec;
 	temp.tv_nsec = time1->tv_nsec - time2->tv_nsec;
 
 	*result_time = temp;
@@ -1262,7 +1302,19 @@ struct timespec temp;
 
 
 
+/*
+ *   RETURN
+ *	0	- time1 == time2
+ *	0 >	- time1 < time2
+ *	0 <	- time1 > time2
+ */
+inline static int __util$cmp_time(struct timespec * time1, struct timespec* time2)
+{
+	if ( time1->tv_sec - time2->tv_sec )
+		return	(time1->tv_sec - time2->tv_sec);
 
+	return	(time1->tv_nsec - time2->tv_nsec);
+}
 
 /*
  * INCrement , DECrement ...
@@ -1279,16 +1331,16 @@ struct timespec temp;
 #define	OPTS$K_PORT	3		/* A TCP/IP port number, NBO		*/
 #define	OPTS$K_IP4	4		/* A TCP/IP IP adddres , NBO		*/
 #define	OPTS$K_CONF	5		/* The options is a name of configuration
-					file to be processed recursively	*/
+	                                file to be processed recursively	*/
 #define OPTS$K_PWD	6		/* Parameter is password - don't show it*/
 
 
 typedef struct _opts	{
-		ASC	name;		/* Options name				*/
+	        ASC	name;		/* Options name				*/
 		void *	ptr;		/* A pointer to buffer which will accept an option's value	*/
 		size_t	sz;		/* A size of target buffer		*/
 		int	type;		/* Value type, see OPTS$K_* constants	*/
-	} OPTS;
+        } OPTS;
 
 #define	OPTS_NULL { {0, 0}, NULL, 0, 0}
 
@@ -1297,14 +1349,13 @@ int	__util$readparams	(int, char *[], OPTS *);
 int	__util$readconfig	(char *, OPTS *);
 int	__util$showparams	(OPTS *	opts);
 
-int	__util$deflog	(const char *, const char *);
+int	__util$deflog		(const char *, const char *);
 int	__util$rewindlogfile	(int);
 int	__util$pattern_match	(char * str$, char * pattern$);
 
-char *	__util$strstr	(char *s1, size_t s1len, char *s2, size_t s2len);
+char *	__util$strstr		(char *s1, size_t s1len, char *s2, size_t s2len);
 
 unsigned	__util$crc32c	(unsigned int crc, const void *buf, size_t buflen);
-
 
 /**
  * @brief __util$hex2bin - convert a hexdecimal string in binary representative.
@@ -1319,21 +1370,21 @@ unsigned	__util$crc32c	(unsigned int crc, const void *buf, size_t buflen);
  *
  */
 inline	static int __util$hex2bin
-		(
-		void *	srchex,
-		void *	dstbin,
-	unsigned short  srchexlen
-		)
+                (
+                void *	srchex,
+                void *	dstbin,
+        unsigned short  srchexlen
+                )
 {
 unsigned char	c, l = 0, h = 0, *__srchex = (unsigned char *) srchex, *__dstbin = (unsigned char *) dstbin;
 int	retlen = (srchexlen + 1) / 2, i;
 
-	/* We will converting from tail to head */
-	__srchex += (srchexlen - 1);
+        /* We will converting from tail to head */
+        __srchex += (srchexlen - 1);
 	__dstbin += (retlen - 1);
 
 	for( i = (srchexlen / 2); i; i--, __dstbin--, __srchex--)
-		{
+	        {
 		c = tolower(*__srchex);
 		l = ((c) <= '9') ? (c) - '0' : (c) - 'a' + 10;
 
@@ -1344,15 +1395,15 @@ int	retlen = (srchexlen + 1) / 2, i;
 
 
 		*__dstbin    = c = l | (h << 4);
-		}
+	        }
 
 	if ( srchexlen % 2)
-		{
+	        {
 		c = tolower(*__srchex);
 		l = ((c) <= '9') ? (c) - '0' : (c) - 'a' + 10;
 
 		*__dstbin    = c = l;
-		}
+	        }
 
 
 
@@ -1372,26 +1423,26 @@ int	retlen = (srchexlen + 1) / 2, i;
  *
  */
 inline	static int __util$bin2hex
-		(
-		void *	srcbin,
-		void *	dsthex,
-	unsigned short  srcbinlen
-		)
+                (
+                void *	srcbin,
+                void *	dsthex,
+        unsigned short  srcbinlen
+                )
 {
 unsigned char    l = 0, h = 0, *__srcbin = (unsigned char *) srcbin, *__dsthex = (unsigned char *) dsthex; ;
 int	retlen = srcbinlen * 2;
 
-	__dsthex[retlen] = '\0';
+        __dsthex[retlen] = '\0';
 
 	for( ; srcbinlen; srcbinlen--, __dsthex += 2, __srcbin++)
-		{
+	        {
 		h       = (*__srcbin) >> 4;
 		h	&= 0x0F;
 		l       = (*__srcbin) & 0x0F;
 
 		*__dsthex    = (h < 10) ? h + '0' : h + 'a' - 10;
 		*(__dsthex+1)= (l < 10) ? l + '0' : l + 'a' - 10;
-		}
+	        }
 
 
 	return	retlen;
@@ -1411,15 +1462,15 @@ int	retlen = srcbinlen * 2;
  *
  */
 inline static int	__util$uncomment	(
-		char	*src,
-		int	srclen,
-		char	marker
-			)
+                char	*src,
+                int	srclen,
+                char	marker
+                        )
 {
 int	count;
 char *	cp, *cmnt = NULL;
 
-	if ( !srclen || !src )
+        if ( !srclen || !src )
 		return 0;
 
 	/*
@@ -1429,10 +1480,10 @@ char *	cp, *cmnt = NULL;
 		cmnt = *cp == marker ? cp : cmnt;
 
 	if ( cmnt )
-		{
+	        {
 		*cmnt = '\0';
 		srclen = (int) (cmnt - src);
-		}
+	        }
 
 	return	srclen;
 }
@@ -1449,14 +1500,14 @@ char *	cp, *cmnt = NULL;
  *
  */
 inline static int	__util$trim	(
-		char	*src,
-		int	srclen
-			)
+        unsigned char	*src,
+                int	srclen
+                        )
 {
 int	count;
-char *	cp;
+unsigned char *	cp;
 
-	if ( !srclen || !src )
+        if ( !srclen || !src )
 		return 0;
 
 	/*
@@ -1465,10 +1516,10 @@ char *	cp;
 	for (count = 0, cp = src; isspace (*cp) && (count < srclen); count++, cp++);
 
 	if ( count )
-		{
+	        {
 		memmove(src, cp, srclen -= count);
 		*(src + srclen) = '\0';
-		}
+	        }
 
 	if ( !srclen )
 		return 0;
@@ -1479,10 +1530,10 @@ char *	cp;
 	for (count = 0, cp = src + srclen; isspace (*(--cp)) && (count < srclen); count++);
 
 	if ( count )
-		{
+	        {
 		* (cp + 1) = '\0';
 		srclen -= count;
-		}
+	        }
 
 	return	srclen;
 }
@@ -1499,14 +1550,14 @@ char *	cp;
  *
  */
 inline static int	__util$collapse	(
-		char	*src,
-		int	srclen
-			)
+                char	*src,
+                int	srclen
+                        )
 {
 int	count;
 char *	cp;
 
-	if ( !srclen || !src )
+        if ( !srclen || !src )
 		return 0;
 
 	/*
@@ -1514,10 +1565,10 @@ char *	cp;
 	 */
 	for (count = 0, cp = src; srclen; src++, srclen--)
 		if ( !isspace (*src) )
-			{
+		        {
 			*(cp++) = *src;
 			count++;
-			}
+		        }
 
 	*cp = '\0';
 
@@ -1535,28 +1586,28 @@ char *	cp;
  *		STS$K_ERROR - output buffer is overflow
  */
 inline static	int	__util$strcat_rx	(
-	void	*	dst,
-	int	dstsz,
-	int *	dstlen,
-	...
-	)
+        void	*	dst,
+        int	dstsz,
+        int *	dstlen,
+        ...
+        )
 {
 va_list ap;
 char *	srcp, *dstp = (char *) dst;
 int	srclen, status = STS$K_ERROR;
 
-	/* Initialize the argument list. */
-	va_start (ap, dstlen);
+        /* Initialize the argument list. */
+        va_start (ap, dstlen);
 
 	/* Looping until destination buffer have a free space */
 	for ( *dstlen = srclen = 0; (dstsz - *dstlen); )
-		{
+	        {
 		/* NULL is a "end-of-list" marker */
 		if ( !(srcp = va_arg(ap, char *)) )
-			{
+		        {
 			status = STS$K_SUCCESS;
 			break;
-			}
+		        }
 
 		/* Get source length, zero - skip to next */
 		if ( !(srclen = va_arg(ap, int)) )
@@ -1567,7 +1618,7 @@ int	srclen, status = STS$K_ERROR;
 
 		memmove(dstp + *dstlen, srcp, srclen);
 		*dstlen += srclen;
-		}
+	        }
 
 	*(dstp + *dstlen) = '\0';
 	va_end(ap);
@@ -1587,26 +1638,26 @@ typedef	struct _kwdent
 	union	{
 		int	val;
 		void *	ptr;
-		};
+	        };
 } KWDENT;
 
 inline	static	int	__util$lookup_key	(
-			char	*src,
-			int	srclen,
+                        char	*src,
+                        int	srclen,
 
-		KWDENT *	ktbl,
-			int	ktblsz,
+                KWDENT *	ktbl,
+                        int	ktblsz,
 
-		KWDENT	**	kwd,
+                KWDENT	**	kwd,
 
-			int	flags
-			)
+                        int	flags
+                        )
 {
 int	status = STS$K_ERROR, len;
 KWDENT *	k = ktbl;
 
-	for ( k = ktbl, len = 0; ktblsz; ktblsz--, k++)
-		{
+        for ( k = ktbl, len = 0; ktblsz; ktblsz--, k++)
+	        {
 		/* Exact comparing or abbreviated ? */
 		if ( !(flags & util$K_LOOKUP_ABBREV) )
 			if ( srclen != k->kwd->len )
@@ -1625,15 +1676,15 @@ KWDENT *	k = ktbl;
 		status = (flags & util$K_LOOKUP_NCASE) ?
 #ifdef	WIN32
 
-			_strnicmp
+		        _strnicmp
 #else
-			strncasecmp
+		        strncasecmp
 #endif
-			(src, k->kwd->sts, len) : memcmp(src, k->kwd->sts, len);
+		        (src, k->kwd->sts, len) : memcmp(src, k->kwd->sts, len);
 
 		if ( status )
 			continue;
-		}
+	        }
 
 	/* No matching ... */
 	if ( status )
@@ -1655,17 +1706,17 @@ KWDENT *	k = ktbl;
  * @return -	length of the data in the output buffer.
  */
 inline static int	__util$uuid2str	(
-		void *	uuid,
-		char *	buf,
-		int	bufsz
-			)
+                void *	uuid,
+                char *	buf,
+                int	bufsz
+                        )
 {
 unsigned char	tmp [256], *puuid = (unsigned char *) uuid;
 int	len;
 
-	len = sprintf(tmp, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-		puuid[0], puuid[1], puuid[2], puuid[3], puuid[4], puuid[5], puuid[6], puuid[7],
-		puuid[8], puuid[9], puuid[10], puuid[11], puuid[12], puuid[13], puuid[14], puuid[15]);
+        len = snprintf( (char *) tmp, sizeof(tmp) - 1, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+	        puuid[0], puuid[1], puuid[2], puuid[3], puuid[4], puuid[5], puuid[6], puuid[7],
+	        puuid[8], puuid[9], puuid[10], puuid[11], puuid[12], puuid[13], puuid[14], puuid[15]);
 
 	memcpy(buf, tmp, len = $MIN(bufsz, len));
 	buf[len] = '\0';
@@ -1686,17 +1737,17 @@ int	len;
  * @return
  */
 static inline	int	__util$fill	(
-		void	*	dst,
-		int		dstsz,
-		void	*	src,
-		int		srcsz
-			)
+                void	*	dst,
+                int		dstsz,
+                void	*	src,
+                int		srcsz
+                        )
 {
 int	fillen = 0;
 char *	_dst = (char *) dst;
 
-	while ( dstsz )
-		{
+        while ( dstsz )
+	        {
 		fillen = $MIN(srcsz, dstsz);
 		memcpy(_dst, src, fillen);
 
@@ -1704,7 +1755,7 @@ char *	_dst = (char *) dst;
 		_dst	+= fillen;
 
 
-		}
+	        }
 
 	return	STS$K_SUCCESS;
 }
@@ -1771,12 +1822,12 @@ char *	_dst = (char *) dst;
 */
 
 static inline int	__util$movc5	(
-		unsigned short  *srclen,	/* pointer to source length	*/
-		char            *source,	/* pointer to source 		*/
-		unsigned char   *fill,		/* pointer to fill byte 	*/
-		unsigned short  *dstlen,	/* pointer to destination length */
-		char             *dest		/* pointer to destination	*/
-			)
+                unsigned short  *srclen,	/* pointer to source length	*/
+                char            *source,	/* pointer to source 		*/
+                unsigned char   *fill,		/* pointer to fill byte 	*/
+                unsigned short  *dstlen,	/* pointer to destination length */
+                char             *dest		/* pointer to destination	*/
+                        )
 {
 	/*
 	*  if the destination is the same size as the source, or shorter
@@ -1791,7 +1842,7 @@ static inline int	__util$movc5	(
 		 */
 		memmove (dest, source, *srclen);
 		memset (&dest[*srclen], *fill, *dstlen - *srclen);
-		}
+	        }
 
 	return STS$K_SUCCESS;
 }
@@ -1800,7 +1851,6 @@ static inline int	__util$movc5	(
 #ifdef	__TRACE__
 //	#define	$TRACEBACK(expr)	{if ( (expr) ) __util$traceback ( #expr, (expr) ); }
 #endif
-
 
 #ifndef	WIN32
 #pragma GCC diagnostic pop

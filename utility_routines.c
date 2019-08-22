@@ -32,20 +32,30 @@
 **	12-NOV-2018	RRL	Changed __util$rewindlog() to truncate file at begin after rewinding.
 **
 **	23-NOV-2018	RRL	Fixed lseek()->29 on STDOUT_FILENO in the __util$rewindlogfile();
+**
+**	23-APR-2019	RRL	Recoded __util$readconfig() to allow using similar keywords  like:
+**				/NSERVER
+**				/NSERVER6
+**
+**	 4-JUN-2019	RRL	Improved output buffer security in the $trace(), $log(), $logd(), $log2buf() routines.
+**
+**	25-JUN-2019	ARL	Special changes for Adnroid;
+**			RRL	Small changes in the  __utility$trace();
+**
+**	 8-JUL-2019	RRL	Improved code quality in the routines processing of configuration options.
 */
 
 
 #ifdef	_WIN32
 #define _CRT_SECURE_NO_WARNINGS	1
+#define	WIN32_LEAN_AND_MEAN
 
-#include        <winsock2.h>
+#include	<winsock2.h>
 #include	<windows.h>
+#include	<ws2tcpip.h>
 
 #include	<sys/timeb.h>
-#include	<stdio.h>
-
-
-
+#include		<io.h>
 #endif
 
 #include	<stddef.h>
@@ -60,6 +70,11 @@
 #include	<sys/types.h>
 #include	<sys/stat.h>
 #include	<fcntl.h>
+
+
+#ifdef  ANDROID
+#include	<android/log.h>
+#endif
 
 #ifndef	_WIN32
 #include	<unistd.h>
@@ -91,28 +106,44 @@
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored  "-Wparentheses"
 #endif
+
+#ifdef _WIN32
+
+#ifndef	STDERR_FILENO
+#define	STDERR_FILENO	2
+#endif
+
+#ifndef	STDIN_FILENO
+#define	STDIN_FILENO	0
+#endif
+
+#ifndef	STDOUT_FILENO
+#define	STDOUT_FILENO	1
+#endif
+
+
+#endif // _WIN32
+
 int	logoutput = STDOUT_FILENO;	/* Default descriptor for default output device		*/
 
 struct sockaddr_in slogsock;	/* SYSLOG Host socket					*/
 
 #ifndef	WIN32
-#include	<features.h>
+#include		<features.h>
 
 #ifndef	_GNU_SOURCE
 #define	_GNU_SOURCE	1
 #endif
 
-#include	<sys/syscall.h>
+#include		<sys/syscall.h>
 
+#ifndef ANDROID
 static inline pid_t	gettid(void)
 {
 	return	syscall ( SYS_gettid );
 }
 #endif
-
-
-
-
+#endif
 
 /*
  *
@@ -317,8 +348,9 @@ int	__util$readconfig	(
 {
 int	i, argslen;
 FILE	*finp = stdin;
-char	*argp, *valp, buf[256];
-OPTS	*optp;
+const char novalp [ 32 ] = {0};
+char	*argp, *valp = novalp, buf[256];
+OPTS	*optp, *optp2;
 
 	/*
 	 * Is the configuration file has been specified ?
@@ -345,7 +377,7 @@ OPTS	*optp;
 
 		if ( (*(argp = buf) != '-') && (*(argp = buf) != '/') )
 			{
-			$LOG(STS$K_ERROR, "%s : %d : Option must be started with a '-', skip : '%s'", fconf, i, buf);
+			$LOG(STS$K_ERROR, "%s : %d : Option must be started with a '-' or '/', skip : '%s'", fconf, i, buf);
 			continue;
 			}
 
@@ -356,7 +388,7 @@ OPTS	*optp;
 			}
 		else	{
 			argslen = (int) strlen(argp);
-			valp = NULL;
+			valp = novalp;
 			}
 
 
@@ -364,24 +396,45 @@ OPTS	*optp;
 		* Compare a given from command line option name against options list,
 		* we expect that options list is terminated by zero-length entry.
 		*
-		* We allow an shortened keywords but it can be a reao of conflicts.
+		* We allow an shortened keywords but it can be a reason of conflicts.
 		*/
-		for (optp = opts; $ASCLEN(&optp->name); optp++)
+		for (optp2 = NULL, optp = opts; $ASCLEN(&optp->name); optp++)
 			{
 #if _WIN32
 			if ( !(_strnicmp (argp, $ASCPTR(&optp->name), $MIN(argslen, $ASCLEN(&optp->name)))) )
 #else
 			if ( !(strncasecmp (argp, $ASCPTR(&optp->name), $MIN(argslen, $ASCLEN(&optp->name)))) )
 #endif
-				break;
+				{
+				if ( argslen == $ASCLEN(&optp->name) )	/* Full matching */
+					{
+					optp2 = optp;
+					break;
+					}
+
+				if ( !optp2 )	/* If it's first hit - save option */
+					{
+					optp2 = optp;
+					continue;
+					}
+
+
+				/*
+				 * Is the new hit is longest than old ?
+				*/
+				if ( $ASCLEN(&optp2->name) < $ASCLEN(&optp->name) )
+					optp2 = optp;
+				}
 			}
 
-		if ( !optp || !$ASCLEN(&optp->name) )
+		if ( !optp2 || !$ASCLEN(&optp2->name) )
 			{
 			$LOG(STS$K_WARN, "%s : %d : Skip unrecognized or unused option", fconf, i);
 			continue;
 			}
 
+
+		optp = optp2 ? optp2 : optp;
 
 		if ( valp && *valp)
 			__util$trim (valp, (int) strlen(valp));
@@ -408,7 +461,7 @@ OPTS	*optp;
 			case	OPTS$K_INT:
 				switch ( optp->sz )
 					{
-					char *endptr;
+					char *endptr = NULL;
 
 					case (sizeof (unsigned long long)):
 						* ((unsigned long long *) optp->ptr) =  strtoull(valp, &endptr, 0);
@@ -423,7 +476,7 @@ OPTS	*optp;
 
 			case	OPTS$K_PWD:
 			case	OPTS$K_STR:
-				((ASC *)optp->ptr)->len  = (unsigned char) strnlen(valp, sizeof(((ASC *)optp->ptr)->sts));
+				((ASC *)optp->ptr)->len  = (unsigned char) $MIN(strnlen(valp, optp->sz), ASC$K_SZ);
 				memcpy( ((ASC *)optp->ptr)->sts, valp, ((ASC *)optp->ptr)->len);
 				((ASC *)optp->ptr)->sts[((ASC *)optp->ptr)->len] = '\0';
 				break;
@@ -465,8 +518,10 @@ int	__util$getparams	(
 {
 int	i;
 size_t	argslen;
-char	*argp, *valp;
+const char novalp [ 32 ] = {0};
+char	*argp, *valp = novalp;
 OPTS	*optp;
+
 
 	/*
 	* We expect to see opts in form:
@@ -494,7 +549,7 @@ OPTS	*optp;
 			}
 		else	{
 			argslen = strlen(argp);
-			valp = NULL;
+			valp = novalp;
 			}
 
 		/*
@@ -559,7 +614,7 @@ OPTS	*optp;
 			case	OPTS$K_INT:
 				switch ( optp->sz )
 					{
-					char *endptr;
+					char *endptr = NULL;
 
 					case (sizeof (unsigned long long)):
 						* ((unsigned long long *) optp->ptr) =  strtoull(valp, &endptr, 0);
@@ -574,7 +629,7 @@ OPTS	*optp;
 
 			case	OPTS$K_PWD:
 			case	OPTS$K_STR:
-				((ASC *)optp->ptr)->len  = (unsigned char) strnlen(valp, sizeof(((ASC *)optp->ptr)->sts));
+				((ASC *)optp->ptr)->len  = (unsigned char) $MIN(strnlen(valp, optp->sz), ASC$K_SZ);
 				memcpy( ((ASC *)optp->ptr)->sts, valp, ((ASC *)optp->ptr)->len);
 				((ASC *)optp->ptr)->sts[((ASC *)optp->ptr)->len] = '\0';
 				break;
@@ -605,6 +660,7 @@ OPTS	*optp;
  *
  *--
  */
+
 void	__util$dumphex	(
 		char *	__fi,
 		unsigned	__li,
@@ -630,13 +686,13 @@ struct timespec now;
 	localtime_r((time_t *)&now, &_tm);
 #endif
 
-	olen = sprintf (out, lfmt,
+	olen = snprintf (out, sizeof(out) - 1, lfmt,
 		_tm.tm_mday, _tm.tm_mon + 1, 1900 + _tm.tm_year,
 		_tm.tm_hour, _tm.tm_min, _tm.tm_sec, (unsigned) now.tv_nsec/TIMSPECDEVIDER,
 		__fi, __li, srclen);
 
 	/* Add <LF> at end of record*/
-	out[olen++] = '\n';
+	out[$MIN(olen++, sizeof(out))] = '\n';
 	write (logoutput, out, olen );
 
 	memset(out, ' ', sizeof(out));
@@ -762,6 +818,7 @@ unsigned j;
  */
 
 void	__util$trace	(
+			int	cond,
 		const char *	fmt,
 		const char *	__mod,
 		const char *	__fi,
@@ -775,9 +832,13 @@ const char	lfmt [] = {"%02u-%02u-%04u %02u:%02u:%02u.%03u " PID_FMT " [%s\\%u] "
 	mfmt [] = {"%02u-%02u-%04u %02u:%02u:%02u.%03u " PID_FMT " [%s\\%s\\%u] "};
 char	out[1024];
 
-unsigned olen;
+unsigned olen, len;
 struct tm _tm;
 struct timespec now;
+
+	if ( !cond )
+		return;
+
 
 	/*
 	** Out to buffer "DD-MM-YYYY HH:MM:SS.msec [<function>\<line>]" prefix
@@ -791,26 +852,34 @@ struct timespec now;
 #endif
 
 	olen = __mod
-		? sprintf (out, mfmt, _tm.tm_mday, _tm.tm_mon + 1, 1900+_tm.tm_year,
+		? sprintf (out, mfmt, _tm.tm_mday, _tm.tm_mon + 1, 1900 + _tm.tm_year,
 		_tm.tm_hour, _tm.tm_min, _tm.tm_sec, (unsigned) now.tv_nsec/TIMSPECDEVIDER,
 		(unsigned) gettid(), __mod, __fi, __li)
-		: sprintf (out, lfmt, _tm.tm_mday, _tm.tm_mon + 1, 1900+_tm.tm_year,
+		: sprintf (out, lfmt, _tm.tm_mday, _tm.tm_mon + 1, 1900 + _tm.tm_year,
 			_tm.tm_hour, _tm.tm_min, _tm.tm_sec, (unsigned) now.tv_nsec/TIMSPECDEVIDER,
 		(unsigned) gettid(), __fi, __li);
-
 
 	/*
 	** Format variable part of string line
 	*/
 	va_start (arglist, __li);
-	olen += vsnprintf(out + olen, sizeof(out) - olen, fmt, arglist);
+	olen += vsnprintf(out + olen, sizeof(out), fmt, arglist);
 	va_end (arglist);
+
+	olen = $MIN(olen, sizeof(out) - 1);
 
 	/* Add <LF> at end of record*/
 	out[olen++] = '\n';
 
 	/* Write to file and flush buffer */
 	write (logoutput, out, olen );
+
+
+
+	/* ARL - for android logcat */
+	#ifdef ANDROID
+		__android_log_print(ANDROID_LOG_VERBOSE, __mod, "%.*s", olen, out);
+	#endif
 
 #ifdef	__SYSLOG__
 #ifndef	WIN32
@@ -865,7 +934,7 @@ struct timespec now;
 #endif
 
 	olen = sprintf (out, lfmt,
-		_tm.tm_mday, _tm.tm_mon + 1, 1900+_tm.tm_year,
+		_tm.tm_mday, _tm.tm_mon + 1, 1900 + _tm.tm_year,
 		_tm.tm_hour, _tm.tm_min, _tm.tm_sec, (unsigned) now.tv_nsec/TIMSPECDEVIDER,
 		(unsigned) gettid(), fac, severity[sev]);
 
@@ -873,11 +942,18 @@ struct timespec now;
 	olen += vsnprintf(out + olen, sizeof(out) - olen, fmt, arglist);
 	va_end (arglist);
 
+	olen = $MIN(olen, sizeof(out) - 1);
+
 	/* Add <LF> at end of record*/
 	out[olen++] = '\n';
 
 	/* Write to file and flush buffer depending on severity level */
 	write (logoutput, out, olen );
+
+	/* ARL - for android logcat */
+	#ifdef ANDROID
+		__android_log_print(ANDROID_LOG_VERBOSE, fac, "%.*s", olen, out);
+	#endif
 
 
 #ifndef	WIN32
@@ -948,6 +1024,8 @@ struct timespec now;
 	*outlen += vsnprintf(__outbuf + *outlen, outsz - *outlen, fmt, arglist);
 	va_end (arglist);
 
+	*outlen = $MIN(*outlen, outsz);
+
 	/* Add NIL at end of record*/
 	__outbuf[*outlen] = '\0';
 
@@ -996,10 +1074,10 @@ struct timespec now = {0};
 #endif
 
 	olen = __mod
-		? sprintf (out, mfmt, _tm.tm_mday, _tm.tm_mon + 1, 1900+_tm.tm_year,
+		? sprintf (out, mfmt, _tm.tm_mday, _tm.tm_mon + 1, 1900 + _tm.tm_year,
 			_tm.tm_hour, _tm.tm_min, _tm.tm_sec, (unsigned) now.tv_nsec/TIMSPECDEVIDER,
 			(unsigned) gettid(), __mod, __fi, __li, fac, severity[sev])
-		: sprintf (out, lfmt, _tm.tm_mday, _tm.tm_mon + 1, 1900+_tm.tm_year,
+		: sprintf (out, lfmt, _tm.tm_mday, _tm.tm_mon + 1, 1900 + _tm.tm_year,
 			_tm.tm_hour, _tm.tm_min, _tm.tm_sec, (unsigned) now.tv_nsec/TIMSPECDEVIDER,
 			(unsigned) gettid(), __fi, __li, fac, severity[sev]);
 
@@ -1007,11 +1085,19 @@ struct timespec now = {0};
 	olen += vsnprintf(out + olen, sizeof(out) - olen, fmt, arglist);
 	va_end (arglist);
 
+	olen = $MIN(olen, sizeof(out) - 1);
+
 	/* Add <LF> at end of record*/
 	out[olen++] = '\n';
 
 	/* Write to file and flush buffer depending on severity level */
 	write (logoutput, out, olen );
+
+		/* ARL - for android logcat */
+	#ifdef ANDROID
+		__android_log_print(ANDROID_LOG_VERBOSE, fac, "%.*s", olen, out);
+	#endif
+
 
 #ifdef	__SYSLOG__
 #ifndef	WIN32
@@ -1046,7 +1132,12 @@ int	__util$deflog	(
 		const char *	sloghost
 				)
 {
+#ifdef	_WIN32
+int	mode = 0;
+#else
 const mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+#endif
+
 int	fd = -1;
 
 	/* Is there SYSLOG Host IP ? */
@@ -1076,7 +1167,7 @@ int	fd = -1;
 
 
 /*
- * Description: compare a current file size with the 'limit' and rewind a current file pointer at beigining of file.
+ * Description: compare a current file size with the 'limit' and rewind a current file pointer at begining of file.
  *
  *  Return:
  *	condition status, see STS$ constants
