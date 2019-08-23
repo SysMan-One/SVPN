@@ -132,7 +132,8 @@
 
 #include	"utility_routines.h"
 #include	"avproto.h"
-#include	"svpn-defs.h"
+#include	"svpn_defs.h"
+
 
 
 #ifdef WIN32
@@ -199,6 +200,7 @@ static const	ASC	__ident__ = {$ASCINI(__IDENT__ "/"  __ARCH__NAME__   "(built at
 static	const	int slen = sizeof(struct sockaddr), one = 1, off = 0;
 
 static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
+	g_state = SVPN$K_STATECTL,	/* Initial state for SVPN-Server	*/
 	g_trace = 1,			/* A flag to produce extensible logging	*/
 	g_enc = SVPN$K_ENC_NONE,	/* Encryption mode, default is none	*/
 	g_threads = 3,			/* A size of the worker crew threads	*/
@@ -400,7 +402,7 @@ inline static int timespec2msec (
  *  RETURN:
  *	condition code, see STS$K_* constant
  */
-static inline	int __recv_n
+static inline	int recv_pkt
 		(
 		int	sd,
 		void	*buf,
@@ -623,6 +625,10 @@ int	i;
 		}
 }
 
+
+
+
+
 static int	worker	(void)
 {
 int	status, td = -1;
@@ -639,7 +645,7 @@ struct pollfd pfd[] = {{g_udp_sd, POLLIN,0 }, {0, POLLIN, 0}};
 	 */
 	pfd[1].fd = td;
 
-	$LOG(STS$K_INFO, "Main loop ...");
+	$LOG(STS$K_INFO, "[#%d-#%d]Main loop ...", td, g_udp_sd);
 
 	while ( !g_exit_flag )
 		{
@@ -656,23 +662,63 @@ struct pollfd pfd[] = {{g_udp_sd, POLLIN,0 }, {0, POLLIN, 0}};
 	$LOG(STS$K_INFO, "Terminated");
 }
 
+
+static	inline	void	salt(
+		void	*buf,
+		int	 bufsz
+			)
+{
+int	r, a, b;
+
+	srand((unsigned) time(NULL)) ;
+
+	for(a = 0; a < 20; a++)
+		{
+		for(b = 0; b < 5; b++)
+			{
+			r = rand();
+			printf("%dt" ,r);
+			}		}
+
+}
+
+
 /*
  *   DESCRIPTION: Performs accept and process request from remote client/peer according Phase I
  *	protocol
- **/
-
+ *
+ *   IMPLICITE INPUT
+ *
+ *   IMPLICITE OUTPUT
+ */
 static int	control	(void)
 {
+int	status, bufsz;
 struct pollfd pfd = {g_udp_sd, POLLIN, 0 };
-char buf[SVPN$SZ_IOBUF];
+char buf[SVPN$SZ_IOBUF], salt[32];
+SVPN_PDU *pdu = (SVPN_PDU *) buf;
 
 	while ( !g_exit_flag )
 		{
 		/* Wait for initial HELLO request ... */
-		__recv_n (g_udp_sd, buf, sizeof(buf), )
+		if ( !(1 & recv_pkt (g_udp_sd, buf, sizeof(buf), &g_timers_set.t_max)) )
+			{
+			$LOG(STS$K_WARN, "No request from remote client ...");
+			continue;
+			}
+
+		/* Check magic prefix of the packet, just drop unrelated packets */
+		if ( memcmp(pdu->magic, SVPN$T_MAZIC,  SVPN$SZ_MAZIC) )
+			continue;
+
+		/* Generate Salt , send WELCOME ... */
+		srand((unsigned) time(NULL)) ;
+		for (int i = 0, *ip = (int *) &salt[0]; i < (sizeof(salt)/sizeof(int)); i++, ip++ )
+			*ip = rand();
+
+		tlv_put()
 
 		}
-
 }
 
 
@@ -733,6 +779,10 @@ pthread_t	tid;
 	/**/
 	while ( !g_exit_flag )
 		{
+		if ( g_state == SVPN$K_STATECTL )
+			control ();
+
+
 		status = 3;
 
 		#ifdef WIN32

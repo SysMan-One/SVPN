@@ -5,9 +5,9 @@ CONFIG -= qt
 CONFIG	+= -static
 
 SOURCES += \
-	../avproto.c \
 	../utility_routines.c \
-	svpn_server.c
+	svpn_server.c \
+	../svpn_utils.c
 
 INCLUDEPATH	+= ..\
 
@@ -61,3 +61,6 @@ else {
 	CONFIG	+= -static
 	LIBS	+= -static -static-libgcc
 }
+
+HEADERS += \
+	../svpn_defs.h

@@ -57,7 +57,7 @@ enum	{
 };
 
 enum	{
-	SVPN$K_TAG_NAME = 0,	/* ASCII	*/
+	SVPN$K_TAG_NAME = 0,	/* BBLOCK/ASCII	*/
 	SVPN$K_TAG_NET,		/* in_addr	*/
 	SVPN$K_TAG_MASK,	/* in_addr	*/
 	SVPN$K_TAG_IP,		/* in_addr	*/
@@ -66,7 +66,14 @@ enum	{
 	SVPN$K_TAG_TOTAL,	/* WORD		*/
 	SVPN$K_TAG_ENC,		/* OCTET	*/
 	SVPN$K_TAG_TRACE,	/* OCTET	*/
-	SVPN$K_TAG_MSG		/* ASCII	*/
+	SVPN$K_TAG_MSG,		/* BBLOCK/ASCII	*/
+	SVPN$K_TAG_SALT		/* BBLOCK	*/
+};
+
+
+enum	{
+	SVPN$K_STATECTL,	/* VPN State - waiting for remote/peer initial request */
+	SVPN$K_STATETUN,	/* In data tunneling mode	*/
 };
 
 #pragma	pack	(push, 1)
@@ -79,15 +86,53 @@ typedef struct	__svpn_pdu
 	{
 	unsigned char	magic[SVPN$SZ_MAZIC],
 			proto,		/* Protocol version	*/
-			req;		/* Request type		*/
-
-	unsigned short	len;		/* Length of the payload part	*/
+			req,		/* Request type		*/
+			digest[20];	/* SHA1/SHA2		*/
 
 	unsigned char	data[0];	/* Placeholder for payload of the PDU */
 } SVPN_PDU;
 
+#define	SVPN$SZ_PDUHDR	(offsetof(__svpn_pdu, data))
+
+
+typedef struct	__svpn_tlv
+	{
+	unsigned char	tag,
+			len;
+	union	{
+		unsigned char	b_val[0];
+		unsigned short	w_val[0];
+		unsigned	l_val[0];
+		unsigned long long q_val[0];
+	};
+} SVPN_TLV;
+
+
+typedef	struct __svpn_ile__	{
+		int	code,
+			bufsz;
+
+		void	*buf;
+		int	*buflen,
+			isnull;
+} SVPN_ILE;
+
+
+
+enum	{
+	SVPN$K_BBLOCK = 0,		/* Octets block			*/
+	SVPN$K_WORD,			/* 16-bits unsigned word	*/
+	SVPN$K_LONG,			/* 32-bit unsigned longword	*/
+	SVPN$K_QUAD,			/* 64-bit unsigned long longword*/
+	SVPN$K_IP			/* IP4 or IP6 address		*/
+};
+
+int	tlv_get (void *buf, int bufsz, int *context, unsigned v_tag, unsigned *v_type, void *val, unsigned *valsz);
+int	tlv_put (void *buf, unsigned bufsz, unsigned v_tag, unsigned v_type, void *val, unsigned valsz, unsigned *adjlen);
+
 
 #pragma	pack	(pop)
+
 
 #ifdef __cplusplus
 	}
