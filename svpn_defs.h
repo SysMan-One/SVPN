@@ -67,7 +67,9 @@ enum	{
 	SVPN$K_TAG_ENC,		/* OCTET	*/
 	SVPN$K_TAG_TRACE,	/* OCTET	*/
 	SVPN$K_TAG_MSG,		/* BBLOCK/ASCII	*/
-	SVPN$K_TAG_SALT		/* BBLOCK	*/
+	SVPN$K_TAG_SALT,	/* BBLOCK	*/
+	SVPN$K_TAG_USER,	/* BBLOCK/ASCII	*/
+	SVPN$K_TAG_PASS		/* BBLOCK	*/
 };
 
 
@@ -76,23 +78,41 @@ enum	{
 	SVPN$K_STATETUN,	/* In data tunneling mode	*/
 };
 
+
+
+enum	{			/* Signaling channel requests */
+	SVPN$K_REQ_NOPE = 0,
+
+	SVPN$K_REQ_HELLO,
+	SVPN$K_REQ_WELCOME,
+	SVPN$K_REQ_LOGIN,
+	SVPN$K_REQ_LOGOUT,
+	SVPN$K_REQ_ACCEPT,
+	SVPN$K_REQ_REJECT,
+	SVPN$K_REQ_PING,
+	SVPN$K_REQ_PONG
+};
+
+
 #pragma	pack	(push, 1)
 
 
 #define	SVPN$SZ_MAZIC	8
 #define	SVPN$T_MAZIC	"StarLet"
+#define	SVPN$SZ_DIGEST	20	/* SHA1 size	*/
 
 typedef struct	__svpn_pdu
 	{
 	unsigned char	magic[SVPN$SZ_MAZIC],
 			proto,		/* Protocol version	*/
 			req,		/* Request type		*/
-			digest[20];	/* SHA1/SHA2		*/
+			digest[SVPN$SZ_DIGEST];	/* SHA1		*/
 
 	unsigned char	data[0];	/* Placeholder for payload of the PDU */
 } SVPN_PDU;
 
-#define	SVPN$SZ_PDUHDR	(offsetof(__svpn_pdu, data))
+#define	SVPN$SZ_PDUHDR	(offsetof(struct __svpn_pdu, data))
+#define	SVPN$SZ_HASHED	(offsetof(struct __svpn_pdu, digest))
 
 
 typedef struct	__svpn_tlv
@@ -108,17 +128,6 @@ typedef struct	__svpn_tlv
 } SVPN_TLV;
 
 
-typedef	struct __svpn_ile__	{
-		int	code,
-			bufsz;
-
-		void	*buf;
-		int	*buflen,
-			isnull;
-} SVPN_ILE;
-
-
-
 enum	{
 	SVPN$K_BBLOCK = 0,		/* Octets block			*/
 	SVPN$K_WORD,			/* 16-bits unsigned word	*/
@@ -127,7 +136,7 @@ enum	{
 	SVPN$K_IP			/* IP4 or IP6 address		*/
 };
 
-int	tlv_get (void *buf, int bufsz, int *context, unsigned v_tag, unsigned *v_type, void *val, unsigned *valsz);
+int	tlv_get (void *buf, int bufsz, unsigned v_tag, unsigned *v_type, void *val, unsigned *valsz);
 int	tlv_put (void *buf, unsigned bufsz, unsigned v_tag, unsigned v_type, void *val, unsigned valsz, unsigned *adjlen);
 
 

@@ -109,7 +109,7 @@ SVPN_TLV *ptlv = (SVPN_TLV *) buf;
 
 
 /*
- *  DESCRIPTION: Find TLV in with specified TAG the PDU from begin of the TLV areas (if contexts is set to -1).
+ *  DESCRIPTION: Find TLV in with specified TAG the PDU from begin of the TLV areas.
  *
  *  INPUT:
  *	pdu:	A Prototocol Data Unit
@@ -128,7 +128,6 @@ SVPN_TLV *ptlv = (SVPN_TLV *) buf;
 int	tlv_get (
 	void		*buf,
 	int		bufsz,
-	int	*	context,
 	unsigned	v_tag,
 	unsigned	*v_type,
 	void	*	val,
@@ -140,13 +139,8 @@ SVPN_TLV *ptlv = (SVPN_TLV *) buf;
 unsigned l_len = 0, l_tag = 0, l_type = 0;
 
 
-	/* Compute a pointer to first unprocessed TLV */
-	if ( context && (*context != -1) )
-		ptlv = (SVPN_TLV *) (buf + (pos = *context));
-	else	{
-		ptlv = (SVPN_TLV *) buf;
-		pos = 0;
-		}
+	ptlv = (SVPN_TLV *) buf;
+	pos = 0;
 
 	/* Find TLVs with a given Tag Id */
 	for ( status = STS$K_WARN; pos < bufsz; )
@@ -163,10 +157,6 @@ unsigned l_len = 0, l_tag = 0, l_type = 0;
 		/* Jump to next TLV */
 		ptlv = (SVPN_TLV *) (((char *) ptlv) + sizeof(SVPN_TLV) + l_len);
 		}
-
-	if ( context )
-		*context = pos;
-
 
 	/* Not found ? */
 	if ( !(1 & status) )
@@ -253,32 +243,30 @@ unsigned count;
 
 
 
-static inline int	tlv_get_by_ile	(
+static inline int	tlv_get_items	(
 		void		*buf,
 		int		bufsz,
-		SVPN_ILE	*item
+		ILE3		*item
 			)
 {
 int	i, l_type = 0, len = 0;
 
 	for ( i = 0; item->code; item++)
 		{
-		len = item->bufsz;
+		len = item->len;
 
-		if  ( item->buflen )
-			*item->buflen = 0;
+		if  ( item->retlen )
+			*item->retlen = -1;
 
-		if ( !(1 & tlv_get (buf, bufsz, NULL, item->code,  &l_type, item->buf, &len)) )
+		if ( !(1 & tlv_get (buf, bufsz, item->code,  &l_type, item->ptr, &item->len)) )
 			{
-			item->isnull = 1;
 			$IFTRACE(g_trace, "No attribute with Tag Id %#x has been found", item->code);
 			continue;
 			}
 
-		if  ( item->buflen )
-			*item->buflen = len;
+		if  ( item->retlen )
+			*item->retlen = len;
 
-		item->isnull = 1;
 		i++;
 		}
 

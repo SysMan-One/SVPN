@@ -6,8 +6,13 @@ CONFIG	+= -static
 
 SOURCES += \
 	../utility_routines.c \
-	svpn_server.c \
-	../svpn_utils.c
+	../sha1.c \
+	../svpn_utils.c \
+	svpn_client.c
+
+HEADERS += \
+	../svpn_defs.h
+
 
 INCLUDEPATH	+= ..\
 
@@ -61,6 +66,3 @@ else {
 	CONFIG	+= -static
 	LIBS	+= -static -static-libgcc
 }
-
-HEADERS += \
-	../svpn_defs.h

@@ -1,4 +1,4 @@
-#define	__MODULE__	"SVPNSRV"
+#define	__MODULE__	"SVPNCLNT"
 #define	__IDENT__	"X.00-00"
 #define	__REV__		"0.0.00"
 
@@ -13,9 +13,9 @@
 **
 **  FACILITY:  StarLet VPN - cross-platform VPN, light weight, high performance
 **
-**  DESCRIPTION: This is a main module, implement server functionality.
-**	Runs as standalone process, accept client's connection request, check authentication,
-**	create logical link for data transfers from/to client.
+**  DESCRIPTION: This is a main module, implement client functionality.
+**	Runs as standalone process, connect to server, performs authentication and establishing
+**	logical link for data transfers from/to client.
 **
 **  ABSTRACT: General logic of interoperation of the StarLet VPN server and client imagine follows:
 **
@@ -63,7 +63,7 @@
 **
 **  AUTHORS: Ruslan R. (The BadAss SysMan) Laishev
 **
-**  CREATION DATE:  20-AUG-2019
+**  CREATION DATE:  28-AUG-2019
 **
 **  MODIFICATION HISTORY:
 **
@@ -205,16 +205,18 @@ static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
 	g_enc = SVPN$K_ENC_NONE,	/* Encryption mode, default is none	*/
 	g_threads = 3,			/* A size of the worker crew threads	*/
 	g_udp_sd = -1,
+	g_tun_sd = -1,
 	g_mss = 0,			/* MTU for datagram			*/
 	g_mtu = 0;			/* MSS for TCP/SYN			*/
 
 
 static const struct timespec g_locktmo = {5, 0};/* A timeout for thread's wait lock	*/
-ASC	g_tun = {$ASCINI("tunX:")},	/* OS specific TUN device name		*/
+ASC	g_tun = {$ASCINI("tun33")},	/* OS specific TUN device name		*/
 	g_logfspec = {0}, g_confspec = {0},
-	g_bind = {0}, g_cliname = {0}, g_auth = {0}, g_network = {0}, g_cliaddr = {0},
+	g_auth = {0}, g_user = {0},
 	g_timers = {0},
-	g_cretun = {0}, g_linkup = {0}, g_linkdown = {0};
+	g_linkup = {0}, g_linkdown = {0},
+	g_server = {0};
 
 struct sockaddr_in g_server_sk = {.sin_family = AF_INET};
 
@@ -236,17 +238,13 @@ const OPTS optstbl [] =		/* Configuration options		*/
 {
 	{$ASCINI("config"),	&g_confspec, ASC$K_SZ,	OPTS$K_CONF},
 	{$ASCINI("trace"),	&g_trace, 0,		OPTS$K_OPT},
-	{$ASCINI("bind"),	&g_bind, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("logfile"),	&g_logfspec, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("devtun"),	&g_tun, ASC$K_SZ,	OPTS$K_STR},
-	{$ASCINI("cliname"),	&g_cliname, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("auth"),	&g_auth, ASC$K_SZ,	OPTS$K_STR},
-	{$ASCINI("network"),	&g_network, ASC$K_SZ,	OPTS$K_STR},
-	{$ASCINI("timers"),	&g_timers, ASC$K_SZ,	OPTS$K_STR},
-	{$ASCINI("encryption"),	&g_enc,	0,		OPTS$K_INT},
 	{$ASCINI("threads"),	&g_threads,	0,	OPTS$K_INT},
 	{$ASCINI("linkup"),	&g_linkup, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("linkdown"),	&g_linkdown, ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("server"),	&g_server, ASC$K_SZ,	OPTS$K_STR},
 
 	OPTS_NULL
 };
@@ -255,54 +253,29 @@ const OPTS optstbl [] =		/* Configuration options		*/
 static	int	config_process	(void)
 {
 int	status = STS$K_SUCCESS;
-char	*cp, *saveptr = NULL, *endptr = NULL;
+char	user[SVPN$SZ_USER + 8];
 
-	/* /TIMERS*/
-	$ASCLEN(&g_timers) = __util$uncomment ($ASCPTR(&g_timers), $ASCLEN(&g_timers), '!');
-	$ASCLEN(&g_timers) = __util$collapse ($ASCPTR(&g_timers), $ASCLEN(&g_timers));
+	/* Extract username from the <auth> */
+	if ( !sscanf($ASCPTR(&g_auth), "%32[^:\n]", user) )
+		$LOG(STS$K_ERROR, "Cannot extract username part from '%.*s'", $ASC(&g_auth));
 
-	if ( $ASCLEN(&g_timers) )
-		{
-		if ( cp = strtok_r( $ASCPTR(&g_timers), ",", &saveptr) )
-			{
-			status = strtoul(cp, &endptr, 0);
-			g_timers_set.t_io.tv_sec = status;
-			}
-
-		if ( cp = strtok_r( $ASCPTR(&g_timers), ",", &saveptr) )
-			{
-			status = strtoul(cp, &endptr, 0);
-			g_timers_set.t_idle.tv_sec = status;
-			}
-
-		if ( cp = strtok_r( NULL, ",", &saveptr) )
-			{
-			status = strtoul(cp, &endptr, 0);
-			g_timers_set.t_ping.tv_sec = status;
-			}
-
-		if ( cp = strtok_r( NULL, ",", &saveptr) )
-			{
-			status = strtoul(cp, &endptr, 0);
-			g_timers_set.t_max.tv_sec = status;
-			}
-		}
+	__util$str2asc (user, &g_user);
 
 	return	STS$K_SUCCESS;
 }
 
 
 
-static int	udp_init(
+static int	udp_init	(
 		int	*sd
 			)
 {
 int	status;
 char	ia [32] = {0}, pn [32]={0};
 unsigned short npn = 0;
-socklen_t slen = sizeof(struct sockaddr);
+struct  sockaddr_in a = {0};
 
-	if ( sscanf($ASCPTR(&g_bind), "%32[^:\n]:%8[0-9]", ia, pn) )
+	if ( sscanf($ASCPTR(&g_server), "%32[^:\n]:%8[0-9]", ia, pn) )
 		{
 		if (  (npn = atoi(pn)) )
 			g_server_sk.sin_port = htons(npn);
@@ -310,43 +283,27 @@ socklen_t slen = sizeof(struct sockaddr);
 		if ( 0 > (status = inet_pton(AF_INET, ia, &g_server_sk.sin_addr)) )
 				return	$LOG(STS$K_ERROR, "inet_pton(%s)->%d, errno=%d", ia, status, errno);
 		}
-	else	return	$LOG(STS$K_ERROR, "Illegal or illformed IP:Port (%.*s)", $ASC(s_bind));
+	else	return	$LOG(STS$K_ERROR, "Illegal or illformed IP:Port (%.*s)", $ASC(&g_server));
 
-	inet_ntop(AF_INET, &g_server_sk.sin_addr, ia, slen);
+	inet_ntop(AF_INET, &g_server_sk.sin_addr, ia, sizeof(ia));
 
-	$LOG(STS$K_INFO, "Initialize listener on : %s:%d", ia, ntohs(g_server_sk.sin_port));
+	$LOG(STS$K_INFO, "Server socket:%s:%d", ia, ntohs(g_server_sk.sin_port));
 
 	g_server_sk.sin_family = AF_INET;
 
 	if ( 0 > (*sd = socket(AF_INET, SOCK_DGRAM, 0)) )
 		return	$LOG(STS$K_FATAL, "socket(), errno=%d", errno);
 
-	/* avoid EADDRINUSE error on bind() */
-#ifdef	SO_REUSEADDR
-	if( 0 > setsockopt(*sd, SOL_SOCKET, SO_REUSEADDR, (char *)&one, sizeof(one))  )
-		$LOG(STS$K_WARN, "setsockopt(%d, SO_REUSEADDR), errno=%d", *sd, errno);
-#endif	/* SO_REUSEADDR */
 
 
-#ifdef	SO_REUSEPORT
-	if( 0 > setsockopt(*sd, SOL_SOCKET, SO_REUSEPORT, (char *)&one, sizeof(one))  )
-		$LOG(STS$K_WARN, "setsockopt(%d, SO_REUSEPORT), errno=%d", *sd, errno);
-#endif	/* SO_REUSEADDR */
+	status = sizeof(struct sockaddr);
+	if ( 0 > (status = getsockname (*sd, &a,  (socklen_t *) &status)) )
+		$LOG(STS$K_ERROR, "getsockname(#%d)->%d, errno=%d", sd, status, __ba_errno__);
 
+	inet_ntop(AF_INET, &a.sin_addr, ia, sizeof(ia));
 
-	if ( 0 > bind(*sd, (struct sockaddr*) &g_server_sk, slen) )
-		{
-		close(*sd);
-		return	$LOG(STS$K_FATAL, "bind(%d, %s:%d), errno=%d", *sd, ia, ntohs(g_server_sk.sin_port), errno);
-		}
-
-
-	return	$LOG(STS$K_SUCCESS, "[%d]UDP socket is initialized %s:%d)", *sd, ia, ntohs(g_server_sk.sin_port));
+	return	$LOG(STS$K_SUCCESS, "[%d]UDP socket is initialized %s:%d)", *sd, ia, ntohs(a.sin_port));
 }
-
-
-
-
 
 
 static	int	tun_init	(
@@ -397,9 +354,6 @@ inline static int timespec2msec (
 {
 	return (src->tv_sec  * 1024) + (src->tv_nsec / 1024);
 }
-
-
-
 
 /*
  *   DESCRIPTION: Read specified number of  bytes from the network socket, wait if not all data has been get
@@ -670,6 +624,8 @@ struct pollfd pfd[] = {{g_udp_sd, POLLIN,0 }, {0, POLLIN, 0}};
 	if ( !(1 & (status = tun_init(&td))) )
 		return	g_exit_flag = $LOG(STS$K_ERROR, "Error allocating TUN device");
 
+
+
 	/* We suppose to be use poll() on the TUN and UDP channels to performs
 	 * I/O asyncronously
 	 */
@@ -693,25 +649,6 @@ struct pollfd pfd[] = {{g_udp_sd, POLLIN,0 }, {0, POLLIN, 0}};
 }
 
 
-static	inline	void	salt(
-		void	*buf,
-		int	 bufsz
-			)
-{
-int	r, a, b;
-
-	srand((unsigned) time(NULL)) ;
-
-	for(a = 0; a < 20; a++)
-		{
-		for(b = 0; b < 5; b++)
-			{
-			r = rand();
-			printf("%dt" ,r);
-			}		}
-
-}
-
 
 /*
  *   DESCRIPTION: Performs accept and process request from remote client/peer according Phase I
@@ -733,50 +670,12 @@ SHA1Context	sha = {0};
 
 	while ( !g_exit_flag )
 		{
-		from.sin_family = AF_INET;
-		from.sin_addr.s_addr = INADDR_ANY;
+		/* Send HELLO from <USER> request ... */
+		pdu->proto = SVPN$K_PROTO_V1;
+		pdu->req = SVPN$K_REQ_HELLO;
+		buflen = SVPN$SZ_PDUHDR;
 
-		/* Wait for initial HELLO from <USER> request ... */
-		$LOG(STS$K_INFO, "[%d]Wait for HELLO from remote client ...", g_udp_sd);
-
-		if ( !(1 & recv_pkt (g_udp_sd, buf, sizeof(buf), &g_timers_set.t_max, &from, &retlen)) )
-			{
-			$LOG(STS$K_WARN, "[%d]No HELLO from remote client ...", g_udp_sd);
-			continue;
-			}
-
-		inet_ntop(AF_INET, &from, sfrom, sizeof(sfrom));
-		$IFTRACE(g_trace, "[%d]Got request code %#x, from %s:%d, length=%d octets", g_udp_sd, pdu->req, sfrom, ntohs(from.sin_port), retlen);
-
-		/* Check length and magic prefix of the packet, just drop unrelated packets */
-		if ( (retlen < SVPN$SZ_PDUHDR) && (memcmp(pdu->magic, SVPN$T_MAZIC,  SVPN$SZ_MAZIC)) )
-			{
-			$IFTRACE(g_trace, "[%d]Drop request code %#x, from %s:%d, length=%d octets", g_udp_sd, pdu->req, retlen);
-			continue;
-			}
-
-		if ( pdu->proto != SVPN$K_PROTO_V1  )
-			{
-			$IFTRACE(g_trace, "[%d]Unsupported protocol version %d", g_udp_sd, pdu->proto);
-			continue;
-			}
-
-		if ( pdu->req != SVPN$K_REQ_HELLO )
-			{
-			$LOG(STS$K_ERROR, "[%d]Ignored unhandled request from %s:%d, code=%#x", g_udp_sd, sfrom, ntohs(from.sin_port), pdu->req);
-			continue;
-			}
-
-		ulen = sizeof(user);
-		if ( !(1 & tlv_get (pdu->data, retlen, SVPN$K_TAG_USER, &v_type, user, &ulen)) )
-			{
-			$LOG(STS$K_ERROR, "[%d]No USERNAME in request", g_udp_sd);
-			continue;
-			}
-
-		$IFTRACE(g_trace, "[%d]Got request code %#x, from %.*s@%s:%d, length=%d octets", g_udp_sd, pdu->req,
-			 ulen, user, sfrom, ntohs(from.sin_port), retlen);
-
+		tlv_put (pdu->data, SVPN$SZ_USER, SVPN$K_TAG_SALT, SVPN$K_BBLOCK, $ASCPTR(&g_user), $ASCLEN(&g_user), &adjlen);
 
 		SHA1Reset(&sha);	/* Compute HASH: PDU header (w/o digest field!) + PDU's payload + <username>:<password> */
 		SHA1Input(&sha, pdu, SVPN$SZ_HASHED);
@@ -784,12 +683,14 @@ SHA1Context	sha = {0};
 		SHA1Input(&sha, $ASCPTR(&g_auth), $ASCLEN(&g_auth));
 		SHA1Result(&sha);
 
-		if ( memcmp(sha.Message_Digest, pdu->digest, SVPN$SZ_DIGEST) )
+		memcpy(pdu->digest, sha.Message_Digest, SVPN$SZ_DIGEST);
+
+		if ( !(1 & xmit_pkt (g_udp_sd, buf, buflen, &g_server_sk)) )
 			{
-			$LOG(STS$K_ERROR, "[%d]Hash check error of HELLO from %.*s@%s:%d", g_udp_sd, ulen, user,
-				sfrom, ntohs(from.sin_port));
+			$LOG(STS$K_ERROR, "Error send HELLO to %s:$d", sfrom, ntohs(from.sin_port));
 			continue;
 			}
+
 
 
 		/* Prepare WELCOME answer:
@@ -928,9 +829,14 @@ pthread_t	tid;
 	/* Additionaly parse and validate configuration options  */
 	config_process();
 
+
+	/* Initialize TUN device */
+	if ( !(1 & tun_init (&g_tun_sd)) )
+		return	$LOG(STS$K_ERROR, "Error initialization of the TUN device. Start aborted.");
+
 	/* Initialize UDP socket */
-	if ( !(1 & udp_init (&g_bind, &g_udp_sd)) )
-		return	$LOG(STS$K_ERROR, "Aborted");
+	if ( !(1 & udp_init (&g_udp_sd)) )
+		return	$LOG(STS$K_ERROR, "Error initialization of the UDP socket. Start aborted.");
 
 
 	/* Just for fun */
