@@ -57,12 +57,12 @@ if (linux-g++-64 | linux-g++):{
 CONFIG (debug, debug|release) {
 	DEFINES	+= _DEBUG=1 __TRACE__=1
 	CONFIG	+= -static
-	LIBS	+= -static -static-libgcc
+	#LIBS	+= -static -static-libgcc
 
 }
 else {
 	CONFIG	+= warn_off
 	DEFINES	+= _DEBUG=1 __TRACE__=1
 	CONFIG	+= -static
-	LIBS	+= -static -static-libgcc
+	#LIBS	+= -static -static-libgcc
 }

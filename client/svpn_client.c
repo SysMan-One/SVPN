@@ -218,6 +218,8 @@ ASC	g_tun = {$ASCINI("tun33")},	/* OS specific TUN device name		*/
 	g_linkup = {0}, g_linkdown = {0},
 	g_server = {0};
 
+char	g_salt[SVPN$SZ_SALT];
+
 struct sockaddr_in g_server_sk = {.sin_family = AF_INET};
 
 					/* Structure to keep timers information */
@@ -288,6 +290,7 @@ struct  sockaddr_in a = {0};
 	inet_ntop(AF_INET, &g_server_sk.sin_addr, ia, sizeof(ia));
 
 	$LOG(STS$K_INFO, "Server socket:%s:%d", ia, ntohs(g_server_sk.sin_port));
+	$ASCLEN(&g_server) = sprintf ($ASCPTR(&g_server), "%s:%d", ia, ntohs(g_server_sk.sin_port));
 
 	g_server_sk.sin_family = AF_INET;
 
@@ -302,7 +305,7 @@ struct  sockaddr_in a = {0};
 
 	inet_ntop(AF_INET, &a.sin_addr, ia, sizeof(ia));
 
-	return	$LOG(STS$K_SUCCESS, "[%d]UDP socket is initialized %s:%d)", *sd, ia, ntohs(a.sin_port));
+	return	$LOG(STS$K_SUCCESS, "[#%d]UDP socket is initialized %s:%d", *sd, ia, ntohs(a.sin_port));
 }
 
 
@@ -394,7 +397,17 @@ struct pollfd pfd = {sd, POLLIN, 0};
 struct timespec	now, etime;
 char	*bufp = (char *) buf;\
 struct	sockaddr_in rsock = {0};
+int	slen = sizeof(struct sockaddr_in);
 
+/* Compute an end of I/O operation time	*/
+#ifdef WIN32
+	timespec_get(&now, TIME_UTC);
+#else
+	if ( status = clock_gettime(CLOCK_REALTIME, &now) )
+		return	$LOG(STS$K_ERROR, "clock_gettime()->%d, errno=%d", status, __ba_errno__);
+#endif
+
+	__util$add_time (&now, delta, &etime);
 
 	while ( !g_exit_flag )
 		{
@@ -435,7 +448,7 @@ struct	sockaddr_in rsock = {0};
 			continue;
 
 		/* Retrieve data from socket buffer	*/
-		if ( 0 < (status = recvfrom(sd, bufp, bufsz, 0, &rsock, slen)) )
+		if ( 0 < (status = recvfrom(sd, bufp, bufsz, 0, &rsock, &slen)) )
 			{
 			/* Optionaly check source address of sender */
 			if ( (from->sin_addr.s_addr != INADDR_ANY) && (from->sin_addr.s_addr != rsock.sin_addr.s_addr) )
@@ -645,7 +658,7 @@ struct pollfd pfd[] = {{g_udp_sd, POLLIN,0 }, {0, POLLIN, 0}};
 		}
 
 
-	$LOG(STS$K_INFO, "Terminated");
+	return	$LOG(STS$K_INFO, "Terminated");
 }
 
 
@@ -662,129 +675,93 @@ static int	control	(void)
 {
 int	status, bufsz, adjlen = 0, buflen = 0, retlen = 0, v_type = 0, ulen = 0, plen = 0;
 struct pollfd pfd = {g_udp_sd, POLLIN, 0 };
-char buf[SVPN$SZ_IOBUF], salt[32], *bufp, sfrom[64] = {0}, user[SVPN$SZ_USER], pass[SVPN$SZ_PASS];
+char buf[SVPN$SZ_IOBUF], salt[32], *bufp, user[SVPN$SZ_USER], pass[SVPN$SZ_PASS];
 SVPN_PDU *pdu = (SVPN_PDU *) buf;
-struct sockaddr_in from = {0};
 char	digest[SVPN$SZ_DIGEST];
 SHA1Context	sha = {0};
 
-	while ( !g_exit_flag )
-		{
-		/* Send HELLO from <USER> request ... */
-		pdu->proto = SVPN$K_PROTO_V1;
-		pdu->req = SVPN$K_REQ_HELLO;
-		buflen = SVPN$SZ_PDUHDR;
+	/* Send HELLO from <USER> request ... */
+	memcpy(pdu->magic, SVPN$T_MAZIC, SVPN$SZ_MAZIC);
+	pdu->proto = SVPN$K_PROTO_V1;
+	pdu->req = SVPN$K_REQ_HELLO;
+	buflen = SVPN$SZ_PDUHDR;
 
-		tlv_put (pdu->data, SVPN$SZ_USER, SVPN$K_TAG_SALT, SVPN$K_BBLOCK, $ASCPTR(&g_user), $ASCLEN(&g_user), &adjlen);
+	tlv_put (pdu->data, SVPN$SZ_USER, SVPN$K_TAG_USER, SVPN$K_BBLOCK, $ASCPTR(&g_user), $ASCLEN(&g_user), &adjlen);
+	buflen += adjlen;
 
-		SHA1Reset(&sha);	/* Compute HASH: PDU header (w/o digest field!) + PDU's payload + <username>:<password> */
-		SHA1Input(&sha, pdu, SVPN$SZ_HASHED);
-		SHA1Input(&sha, pdu->data, retlen);
-		SHA1Input(&sha, $ASCPTR(&g_auth), $ASCLEN(&g_auth));
-		SHA1Result(&sha);
-
-		memcpy(pdu->digest, sha.Message_Digest, SVPN$SZ_DIGEST);
-
-		if ( !(1 & xmit_pkt (g_udp_sd, buf, buflen, &g_server_sk)) )
-			{
-			$LOG(STS$K_ERROR, "Error send HELLO to %s:$d", sfrom, ntohs(from.sin_port));
-			continue;
-			}
+	if ( !(1 & xmit_pkt (g_udp_sd, buf, buflen, &g_server_sk)) )
+		return	$LOG(STS$K_ERROR, "[#%d]Error send HELLO to %.*s", g_udp_sd, $ASC(&g_server));
 
 
 
-		/* Prepare WELCOME answer:
-		 *	Generate Salt
-		 */
-		$IFTRACE(g_trace, "[%d]Prepare WELCOME for %.*s@%s:%d", g_udp_sd,ulen, user, sfrom, ntohs(from.sin_port));
+	/* Wait for WELCOME + Salt ... */
+	$IFTRACE(g_trace, "[#%d]Wait for WELCOME from %.*s (timeout is %d msec) ...", g_udp_sd, $ASC(&g_server), timespec2msec (&g_timers_set.t_io));
 
-		srand((unsigned) time(NULL)) ;
-		for (int i = 0, *ip = (int *) &salt[0]; i < (sizeof(salt)/sizeof(int)); i++, ip++ )
-			*ip = rand();
+	if ( !(1 & recv_pkt (g_udp_sd, buf, sizeof(buf), &g_timers_set.t_io, &g_server_sk, &retlen)) )
+		return	$LOG(STS$K_WARN, "[#%d]No WELCOME from %.*s in %d msec, cancel session setup", g_udp_sd, $ASC(&g_server), timespec2msec (&g_timers_set.t_io));
 
-		bufp = pdu->data;	/* Form PDU with the options list ... */
-		bufsz = sizeof(buf) - (buflen = SVPN$SZ_PDUHDR);
+	/* Check length and magic prefix of the packet, just drop unrelated packets */
+	if ( (retlen < SVPN$SZ_PDUHDR) && (memcmp(pdu->magic, SVPN$T_MAZIC,  SVPN$SZ_MAZIC)) )
+		return	$LOG(STS$K_ERROR, "[#%d]Drop request code %#x, from %.*s, length=%d octets", g_udp_sd, pdu->req, $ASC(&g_server), retlen);
 
-		if ( !(1 & (status = tlv_put (bufp, bufsz, SVPN$K_TAG_SALT, SVPN$K_BBLOCK, salt, sizeof(salt), &adjlen))) )
-			$LOG(status, "[%d]Error processing request from %s:%d, code=%#x", sfrom, ntohs(from.sin_port), pdu->req);
+	if ( pdu->proto != SVPN$K_PROTO_V1  )
+		return	$LOG(STS$K_ERROR, "[#%d]Unsupported protocol version=%d", g_udp_sd, pdu->proto);
 
-		buflen += adjlen;
+	if ( pdu->req != SVPN$K_REQ_WELCOME )
+		return	$LOG(STS$K_ERROR, "[#%d]Ignored unexpected request from %.*s, code=%#x", g_udp_sd, $ASC(&g_server), pdu->req);
 
-		/* Send WELCOME ... */
-		pdu->req = SVPN$K_REQ_WELCOME;
-		if ( !(1 & xmit_pkt (g_udp_sd, buf, buflen, &from)) )
-			{
-			$LOG(STS$K_ERROR, "Error send WELCOME to %s:$d", sfrom, ntohs(from.sin_port));
-			continue;
-			}
+	/* Process WELCOME response from server request: extract Salt  */
+	adjlen = SVPN$SZ_SALT;
+	if ( !(1 & tlv_get (pdu->data, retlen - SVPN$SZ_PDUHDR, SVPN$K_TAG_SALT, &v_type, g_salt, &adjlen)) )
+		return	$LOG(STS$K_ERROR, "[%d]No Salt in request", g_udp_sd);
 
 
-		/* Wait for LOGIN ... */
-		$LOG(STS$K_INFO, "[%d]Wait for LOGIN from %s:%d (timeout is %d msec) ...", g_udp_sd, sfrom, ntohs(from.sin_port), timespec2msec (&g_timers_set.t_io));
+	/* Prepare & send LOGIN request ... */
+	memcpy(pdu->magic, SVPN$T_MAZIC, SVPN$SZ_MAZIC);
+	pdu->proto = SVPN$K_PROTO_V1;
+	pdu->req = SVPN$K_REQ_LOGIN;
+	buflen = SVPN$SZ_PDUHDR;
 
-		if ( !(1 & recv_pkt (g_udp_sd, buf, sizeof(buf), &g_timers_set.t_io, &from, &retlen)) )
-			{
-			$LOG(STS$K_WARN, "[%d]No LOGIN from %s:%d %d msec, cancel session setup", g_udp_sd, sfrom, ntohs(from.sin_port), timespec2msec (&g_timers_set.t_io));
-			continue;
-			}
+	SHA1Reset(&sha);	/* Compute HASH: PDU header (w/o digest field!) + PDU's payload + <username>:<password> */
+	SHA1Input(&sha, pdu, SVPN$SZ_HASHED);
+	SHA1Input(&sha, $ASCPTR(&g_auth), $ASCLEN(&g_auth));
+	SHA1Result(&sha);
 
-		/* Check length and magic prefix of the packet, just drop unrelated packets */
-		if ( (retlen < SVPN$SZ_PDUHDR) && (memcmp(pdu->magic, SVPN$T_MAZIC,  SVPN$SZ_MAZIC)) )
-			{
-			$LOG(STS$K_ERROR, "[%d]Drop request code %#x, from %s:%d, length=%d octets", g_udp_sd, pdu->req, sfrom, ntohs(from.sin_port), retlen);
-			continue;
-			}
+	memcpy(pdu->digest, sha.Message_Digest, SVPN$SZ_DIGEST);
 
-		if ( pdu->proto != SVPN$K_PROTO_V1  )
-			{
-			$LOG(STS$K_ERROR, "[%d]Unsupported protocol version=%d", g_udp_sd, pdu->proto);
-			continue;
-			}
-
-		if ( pdu->req != SVPN$K_REQ_LOGIN )
-			{
-			$LOG(STS$K_ERROR, "[%d]Ignored unexpected request from %s:%d, code=%#x", g_udp_sd, sfrom, ntohs(from.sin_port), pdu->req);
-			continue;
-			}
-
-		/* Process LOGIN request: compute local hash to compare with the pdu.digest */
-		retlen += SVPN$SZ_PDUHDR;
-
-		SHA1Reset(&sha);	/* Compute HASH: PDU header (w/o digest field!) + PDU's payload + <username>:<password> */
-		SHA1Input(&sha, pdu, SVPN$SZ_HASHED);
-		SHA1Input(&sha, pdu->data, retlen);
-		SHA1Input(&sha, $ASCPTR(&g_auth), $ASCLEN(&g_auth));
-		SHA1Result(&sha);
-
-		if ( memcmp(sha.Message_Digest, pdu->digest, SVPN$SZ_DIGEST) )
-			{
-			$LOG(STS$K_ERROR, "[%d]User '%.*s' authentication error", g_udp_sd, ulen, user);
-			continue;
-			}
-
-		/* So, authenticaion was successfull, now we can form client's option list and send ACCEPT;
-		 *	form PDU with the options list ...
-		 */
-		bufp = pdu->data;
-		bufsz = sizeof(buf) - (buflen = SVPN$SZ_PDUHDR);
-
-		if ( !(1 & (status = tlv_put (bufp, bufsz, SVPN$K_TAG_SALT, SVPN$K_BBLOCK, salt, sizeof(salt), &adjlen))) )
-			$LOG(status, "[%d]Error processing request from %s:%d, code=%#x", sfrom, ntohs(from.sin_port), pdu->req);
-
-		buflen += adjlen;
+	if ( !(1 & xmit_pkt (g_udp_sd, buf, buflen, &g_server_sk)) )
+		return	$LOG(STS$K_ERROR, "[#%d]Error send HELLO to %.*s", g_udp_sd, $ASC(&g_server));
 
 
-		/* Send ACCEPT ... */
-		pdu->req = SVPN$K_REQ_ACCEPT;
-		if ( !(1 & xmit_pkt (g_udp_sd, buf, buflen, &from)) )
-			{
-			$LOG(STS$K_ERROR, "Error send WELCOME to %s:$d", sfrom, ntohs(from.sin_port));
-			continue;
-			}
-		}
+	/* Wait for ACCEPT ... */
+	$IFTRACE(g_trace, "[#%d]Wait for ACCEPT from %.*s (timeout is %d msec) ...", g_udp_sd, $ASC(&g_server), timespec2msec (&g_timers_set.t_io));
 
+	if ( !(1 & recv_pkt (g_udp_sd, buf, sizeof(buf), &g_timers_set.t_io, &g_server_sk, &retlen)) )
+		return	$LOG(STS$K_WARN, "[#%d]No ACCEPT from %.*s in %d msec, cancel session setup", g_udp_sd, $ASC(&g_server), timespec2msec (&g_timers_set.t_io));
 
-	return	STS$K_ERROR;
+	/* Check length and magic prefix of the packet, just drop unrelated packets */
+	if ( (retlen < SVPN$SZ_PDUHDR) && (memcmp(pdu->magic, SVPN$T_MAZIC,  SVPN$SZ_MAZIC)) )
+		return	$LOG(STS$K_ERROR, "[#%d]Drop request code %#x, from %.*s, length=%d octets", g_udp_sd, pdu->req, $ASC(&g_server), retlen);
+
+	if ( pdu->proto != SVPN$K_PROTO_V1  )
+		return	$LOG(STS$K_ERROR, "[#%d]Unsupported protocol version=%d", g_udp_sd, pdu->proto);
+
+	if ( pdu->req != SVPN$K_REQ_ACCEPT )
+		return	$LOG(STS$K_ERROR, "[#%d]Ignored unexpected request from %.*s, code=%#x", g_udp_sd, $ASC(&g_server), pdu->req);
+
+	/* Process ACCEPT  request: compute local hash to compare with the pdu.digest */
+	SHA1Reset(&sha);	/* Compute HASH: PDU header (w/o digest field!) + PDU's payload + <username>:<password> */
+	SHA1Input(&sha, pdu, SVPN$SZ_HASHED);
+	SHA1Input(&sha, pdu->data, retlen - SVPN$SZ_PDUHDR);
+	SHA1Input(&sha, $ASCPTR(&g_auth), $ASCLEN(&g_auth));
+	SHA1Result(&sha);
+
+	if ( memcmp(sha.Message_Digest, pdu->digest, SVPN$SZ_DIGEST) )
+		return	$LOG(STS$K_ERROR, "[%d]Hash checking error", g_udp_sd);
+
+	/* Extract attributes from ACCEPT packet */
+
+	return	$LOG(STS$K_SUCCESS, "Session is establied");
 }
 
 
@@ -842,10 +819,12 @@ pthread_t	tid;
 	/* Just for fun */
 	init_sig_handler ();
 
+#if 0
 	/* Create crew workers */
 	for ( int i = 0; i < g_threads; i++ )
 		if ( status = pthread_create(&tid, NULL, worker, NULL) )
 			return	$LOG(STS$K_FATAL, "Cannot start worker thread, pthread_create()->%d, errno=%d", status, errno);
+#endif
 
 	/**/
 	while ( !g_exit_flag )
