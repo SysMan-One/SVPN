@@ -705,24 +705,6 @@ struct pollfd pfd[] = {{g_udp_sd, POLLIN,0 }, {0, POLLIN, 0}};
 }
 
 
-static	inline	void	salt(
-		void	*buf,
-		int	 bufsz
-			)
-{
-int	r, a, b;
-
-	srand((unsigned) time(NULL)) ;
-
-	for(a = 0; a < 20; a++)
-		{
-		for(b = 0; b < 5; b++)
-			{
-			r = rand();
-			printf("%dt" ,r);
-			}		}
-
-}
 
 
 /*
@@ -794,9 +776,7 @@ SHA1Context	sha = {0};
 		 */
 		$IFTRACE(g_trace, "[%d]Prepare WELCOME for %.*s@%s:%d", g_udp_sd,ulen, user, sfrom, ntohs(from.sin_port));
 
-		srand((unsigned) time(NULL)) ;
-		for (int i = 0, *ip = (int *) &salt[0]; i < (sizeof(salt)/sizeof(int)); i++, ip++ )
-			*ip = rand();
+		gen_salt(salt, sizeof(salt));
 
 		bufp = pdu->data;	/* Form PDU with the options list ... */
 		bufsz = sizeof(buf) - (buflen = SVPN$SZ_PDUHDR);

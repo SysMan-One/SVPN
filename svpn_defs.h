@@ -141,6 +141,29 @@ int	tlv_get (void *buf, int bufsz, unsigned v_tag, unsigned *v_type, void *val, 
 int	tlv_put (void *buf, unsigned bufsz, unsigned v_tag, unsigned v_type, void *val, unsigned valsz, unsigned *adjlen);
 
 
+static	inline	void	rand_octets(
+		void	*buf,
+		int	 bufsz
+			)
+{
+int	i, r, *ip;
+
+	srand((unsigned) time(NULL)) ;
+
+	for(i =  135 + (time(NULL)%135); i--; )
+		rand();
+
+	for (i = bufsz/(sizeof (int)), ip = (int *)buf; i--; ip++ )
+		*ip = rand();
+
+	if ( i = (bufsz % (sizeof(int))) )
+		{
+		r = rand();
+		memcpy(ip, &r, i);
+		}
+}
+
+
 #pragma	pack	(pop)
 
 

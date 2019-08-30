@@ -661,6 +661,62 @@ struct pollfd pfd[] = {{g_udp_sd, POLLIN,0 }, {0, POLLIN, 0}};
 	return	$LOG(STS$K_INFO, "Terminated");
 }
 
+static inline	void	hmac_gen	(
+			void	*dst,
+			int	 dstsz,
+				...
+				)
+{
+void	*src;
+int	srclen;
+SHA1Context	sha = {0};
+va_list ap;
+
+	SHA1Reset(&sha);	/* Compute HASH: PDU header (w/o digest field!) + PDU's payload + <username>:<password> */
+
+	va_start (ap, dstsz);
+
+	while ( src = va_arg(ap, char *) )
+		{
+		srclen	= va_arg(ap, int);
+
+		SHA1Input(&sha, src, srclen);
+		}
+	va_end (ap);
+
+	SHA1Result(&sha);
+	memcpy(dst, sha.Message_Digest, $MIN(dstsz, sizeof(sha.Message_Digest)));
+}
+
+
+static inline	int	hmac_check	(
+			void	*dst,
+			int	 dstsz,
+				...
+				)
+{
+void	*src;
+int	srclen;
+SHA1Context	sha = {0};
+va_list ap;
+
+	SHA1Reset(&sha);	/* Compute HASH: PDU header (w/o digest field!) + PDU's payload + <username>:<password> */
+
+	va_start (ap, dstsz);
+
+	while ( src = va_arg(ap, char *) )
+		{
+		srclen	= va_arg(ap, int);
+
+		SHA1Input(&sha, src, srclen);
+		}
+	va_end (ap);
+
+	SHA1Result(&sha);
+	return	!memcmp(dst, sha.Message_Digest, $MIN(dstsz, sizeof(sha.Message_Digest)));
+}
+
+
 
 
 /*
@@ -675,12 +731,18 @@ static int	control	(void)
 {
 int	status, bufsz, adjlen = 0, buflen = 0, retlen = 0, v_type = 0, ulen = 0, plen = 0;
 struct pollfd pfd = {g_udp_sd, POLLIN, 0 };
-char buf[SVPN$SZ_IOBUF], salt[32], *bufp, user[SVPN$SZ_USER], pass[SVPN$SZ_PASS];
+char buf[SVPN$SZ_IOBUF], l_salt[SVPN$SZ_SALT], digest[SVPN$SZ_DIGEST], *bufp, user[SVPN$SZ_USER], pass[SVPN$SZ_PASS];
 SVPN_PDU *pdu = (SVPN_PDU *) buf;
-char	digest[SVPN$SZ_DIGEST];
 SHA1Context	sha = {0};
 
-	/* Send HELLO from <USER> request ... */
+	/* Generate our own Salt ... */
+	rand_octets (l_salt, sizeof(l_salt));
+
+
+
+	/* Send HELLO from <USER> request ...
+	 *	pdu->digest = sha(header, salt, payload);
+	 */
 	memcpy(pdu->magic, SVPN$T_MAZIC, SVPN$SZ_MAZIC);
 	pdu->proto = SVPN$K_PROTO_V1;
 	pdu->req = SVPN$K_REQ_HELLO;
@@ -689,8 +751,18 @@ SHA1Context	sha = {0};
 	tlv_put (pdu->data, SVPN$SZ_USER, SVPN$K_TAG_USER, SVPN$K_BBLOCK, $ASCPTR(&g_user), $ASCLEN(&g_user), &adjlen);
 	buflen += adjlen;
 
+	/* Compute HMAC*/
+	hmac_gen(pdu->digest, SVPN$SZ_DIGEST,
+			pdu, SVPN$SZ_HASHED, l_salt, sizeof(l_salt), pdu->data, buflen - SVPN$SZ_PDUHDR,
+				NULL /* End-of-arguments marger !*/);
+	memcpy(digest, pdu->digest, SVPN$SZ_DIGEST);
+
 	if ( !(1 & xmit_pkt (g_udp_sd, buf, buflen, &g_server_sk)) )
 		return	$LOG(STS$K_ERROR, "[#%d]Error send HELLO to %.*s", g_udp_sd, $ASC(&g_server));
+
+	$IFTRACE(g_trace, "[#%d]Sent HELLO to %.*s, %d octets", g_udp_sd, $ASC(&g_server), buflen);
+
+
 
 
 
@@ -710,10 +782,21 @@ SHA1Context	sha = {0};
 	if ( pdu->req != SVPN$K_REQ_WELCOME )
 		return	$LOG(STS$K_ERROR, "[#%d]Ignored unexpected request from %.*s, code=%#x", g_udp_sd, $ASC(&g_server), pdu->req);
 
-	/* Process WELCOME response from server request: extract Salt  */
+	/* Process WELCOME response from server request:
+	 *	check HMAC,
+	 *	extract Salt
+	 */
+	if ( !(1 & hmac_check(digest, SVPN$SZ_DIGEST,
+		pdu, SVPN$SZ_HASHED, digest, SVPN$SZ_DIGEST, pdu->data, buflen - SVPN$SZ_PDUHDR,
+			NULL /* End-of-arguments marger !*/)) )
+		return	$LOG(STS$K_ERROR, "[#%d]Has mismatch", g_udp_sd);
+
 	adjlen = SVPN$SZ_SALT;
 	if ( !(1 & tlv_get (pdu->data, retlen - SVPN$SZ_PDUHDR, SVPN$K_TAG_SALT, &v_type, g_salt, &adjlen)) )
 		return	$LOG(STS$K_ERROR, "[%d]No Salt in request", g_udp_sd);
+
+
+
 
 
 	/* Prepare & send LOGIN request ... */
@@ -722,15 +805,19 @@ SHA1Context	sha = {0};
 	pdu->req = SVPN$K_REQ_LOGIN;
 	buflen = SVPN$SZ_PDUHDR;
 
-	SHA1Reset(&sha);	/* Compute HASH: PDU header (w/o digest field!) + PDU's payload + <username>:<password> */
-	SHA1Input(&sha, pdu, SVPN$SZ_HASHED);
-	SHA1Input(&sha, $ASCPTR(&g_auth), $ASCLEN(&g_auth));
-	SHA1Result(&sha);
-
-	memcpy(pdu->digest, sha.Message_Digest, SVPN$SZ_DIGEST);
+	/* Compute HMAC*/
+	hmac_gen(pdu->digest, SVPN$SZ_DIGEST,
+			pdu, SVPN$SZ_HASHED, g_salt, sizeof(g_salt), pdu->data, buflen - SVPN$SZ_PDUHDR, $ASCPTR(&g_auth), $ASCLEN(&g_auth),
+				NULL /* End-of-arguments marger !*/);
+	memcpy(digest, pdu->digest, SVPN$SZ_DIGEST);
 
 	if ( !(1 & xmit_pkt (g_udp_sd, buf, buflen, &g_server_sk)) )
 		return	$LOG(STS$K_ERROR, "[#%d]Error send HELLO to %.*s", g_udp_sd, $ASC(&g_server));
+
+	$IFTRACE(g_trace, "[#%d]Sent LOGIN to %.*s, %d octets", g_udp_sd, $ASC(&g_server), buflen);
+
+
+
 
 
 	/* Wait for ACCEPT ... */

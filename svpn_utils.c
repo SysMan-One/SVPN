@@ -272,3 +272,9 @@ int	i, l_type = 0, len = 0;
 
 	return	(i ? STS$K_SUCCESS : STS$K_WARN);
 }
+
+
+
+
+
+
