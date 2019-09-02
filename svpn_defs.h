@@ -68,7 +68,6 @@ enum	{
 	SVPN$K_TAG_ENC,		/* OCTET	*/
 	SVPN$K_TAG_TRACE,	/* OCTET	*/
 	SVPN$K_TAG_MSG,		/* BBLOCK/ASCII	*/
-	SVPN$K_TAG_SALT,	/* BBLOCK	*/
 	SVPN$K_TAG_USER,	/* BBLOCK/ASCII	*/
 	SVPN$K_TAG_PASS		/* BBLOCK	*/
 };
@@ -84,8 +83,6 @@ enum	{
 enum	{			/* Signaling channel requests */
 	SVPN$K_REQ_NOPE = 0,
 
-	SVPN$K_REQ_HELLO,
-	SVPN$K_REQ_WELCOME,
 	SVPN$K_REQ_LOGIN,
 	SVPN$K_REQ_LOGOUT,
 	SVPN$K_REQ_ACCEPT,
@@ -139,7 +136,7 @@ enum	{
 
 int	tlv_get (void *buf, int bufsz, unsigned v_tag, unsigned *v_type, void *val, unsigned *valsz);
 int	tlv_put (void *buf, unsigned bufsz, unsigned v_tag, unsigned v_type, void *val, unsigned valsz, unsigned *adjlen);
-
+void	tlv_dump (void *buf, unsigned bufsz);
 
 static	inline	void	rand_octets(
 		void	*buf,

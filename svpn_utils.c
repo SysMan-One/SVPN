@@ -216,7 +216,7 @@ unsigned l_len = 0, l_tag = 0, l_type = 0;
  */
 void	tlv_dump	(
 		void	*buf,
-		int	 bufsz
+		unsigned	 bufsz
 			)
 {
 SVPN_TLV *ptlv;
@@ -243,7 +243,7 @@ unsigned count;
 
 
 
-static inline int	tlv_get_items	(
+int	tlv_get_items	(
 		void		*buf,
 		int		bufsz,
 		ILE3		*item
@@ -260,7 +260,7 @@ int	i, l_type = 0, len = 0;
 
 		if ( !(1 & tlv_get (buf, bufsz, item->code,  &l_type, item->ptr, &item->len)) )
 			{
-			$IFTRACE(g_trace, "No attribute with Tag Id %#x has been found", item->code);
+			$LOG(STS$K_WARN, "No attribute with Tag Id %#x has been found", item->code);
 			continue;
 			}
 

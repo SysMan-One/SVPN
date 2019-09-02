@@ -213,7 +213,7 @@ static const struct timespec g_locktmo = {5, 0};/* A timeout for thread's wait l
 ASC	g_tun = {$ASCINI("tunX:")},	/* OS specific TUN device name		*/
 	g_logfspec = {0}, g_confspec = {0},
 	g_bind = {0}, g_cliname = {0}, g_auth = {0}, g_network = {0}, g_cliaddr = {0},
-	g_timers = {0},
+	g_timers = {$ASCINI("7, 300, 13, 15")},
 	g_cretun = {0}, g_linkup = {0}, g_linkdown = {0};
 
 struct sockaddr_in g_server_sk = {.sin_family = AF_INET};
@@ -287,6 +287,8 @@ char	*cp, *saveptr = NULL, *endptr = NULL;
 			g_timers_set.t_max.tv_sec = status;
 			}
 		}
+
+	if ( $ASCLEN(&g_enc))
 
 	return	STS$K_SUCCESS;
 }
@@ -706,6 +708,63 @@ struct pollfd pfd[] = {{g_udp_sd, POLLIN,0 }, {0, POLLIN, 0}};
 
 
 
+static inline	void	hmac_gen	(
+			void	*dst,
+			int	 dstsz,
+				...
+				)
+{
+void	*src;
+int	srclen;
+SHA1Context	sha = {0};
+va_list ap;
+
+	SHA1Reset(&sha);	/* Compute HASH: PDU header (w/o digest field!) + PDU's payload + <username>:<password> */
+
+	va_start (ap, dstsz);
+
+	while ( src = va_arg(ap, char *) )
+		{
+		srclen	= va_arg(ap, int);
+
+		SHA1Input(&sha, src, srclen);
+		}
+	va_end (ap);
+
+	SHA1Result(&sha);
+	memcpy(dst, sha.Message_Digest, $MIN(dstsz, sizeof(sha.Message_Digest)));
+}
+
+
+static inline	int	hmac_check	(
+			void	*dst,
+			int	 dstsz,
+				...
+				)
+{
+void	*src;
+int	srclen;
+SHA1Context	sha = {0};
+va_list ap;
+
+	SHA1Reset(&sha);	/* Compute HASH: PDU header (w/o digest field!) + PDU's payload + <username>:<password> */
+
+	va_start (ap, dstsz);
+
+	while ( src = va_arg(ap, char *) )
+		{
+		srclen	= va_arg(ap, int);
+
+		SHA1Input(&sha, src, srclen);
+		}
+	va_end (ap);
+
+	SHA1Result(&sha);
+	return	!memcmp(dst, sha.Message_Digest, $MIN(dstsz, sizeof(sha.Message_Digest)));
+}
+
+
+
 
 /*
  *   DESCRIPTION: Performs accept and process request from remote client/peer according Phase I
@@ -717,7 +776,7 @@ struct pollfd pfd[] = {{g_udp_sd, POLLIN,0 }, {0, POLLIN, 0}};
  */
 static int	control	(void)
 {
-int	status, bufsz, adjlen = 0, buflen = 0, retlen = 0, v_type = 0, ulen = 0, plen = 0;
+int	status, bufsz, adjlen = 0, buflen = 0, v_type = 0, ulen = 0, plen = 0;
 struct pollfd pfd = {g_udp_sd, POLLIN, 0 };
 char buf[SVPN$SZ_IOBUF], salt[SVPN$SZ_SALT], *bufp, sfrom[64] = {0}, user[SVPN$SZ_USER], pass[SVPN$SZ_PASS];
 SVPN_PDU *pdu = (SVPN_PDU *) buf;
@@ -725,141 +784,81 @@ struct sockaddr_in from = {0};
 char	digest[SVPN$SZ_DIGEST];
 SHA1Context	sha = {0};
 
-	while ( !g_exit_flag )
-		{
-		from.sin_family = AF_INET;
-		from.sin_addr.s_addr = INADDR_ANY;
+	/* Accept LOGIN request from any IP ... */
+	from.sin_family = AF_INET;
+	from.sin_addr.s_addr = INADDR_ANY;
 
-		/* Wait for initial HELLO from <USER> request ... */
-		$IFTRACE(g_trace, "[%d]Wait for HELLO from remote client ...", g_udp_sd);
 
-		if ( !(1 & recv_pkt (g_udp_sd, buf, sizeof(buf), &g_timers_set.t_max, &from, &retlen)) )
-			{
-			$LOG(STS$K_WARN, "[%d]No HELLO from remote client ...", g_udp_sd);
-			continue;
-			}
+	/* Wait for LOGIN from <USER> request ... */
+	$IFTRACE(g_trace, "[%d]Wait for LOGIN from remote client ...", g_udp_sd);
 
-		inet_ntop(AF_INET, &from.sin_addr, sfrom, sizeof(sfrom));
-		$IFTRACE(g_trace, "[%d]Got request code %#x, from %s:%d, %d octets", g_udp_sd, pdu->req, sfrom, ntohs(from.sin_port), retlen);
+	if ( !(1 & recv_pkt (g_udp_sd, buf, sizeof(buf), &g_timers_set.t_max, &from, &buflen)) )
+		return	$LOG(STS$K_WARN, "[%d]No LOGIN from remote client ...", g_udp_sd);
 
-		/* Check length and magic prefix of the packet, just drop unrelated packets */
-		if ( (retlen < SVPN$SZ_PDUHDR) && (memcmp(pdu->magic, SVPN$T_MAZIC,  SVPN$SZ_MAZIC)) )
-			{
-			$IFTRACE(g_trace, "[%d]Drop request code %#x, from %s:%d, %d octets", g_udp_sd, pdu->req, retlen);
-			continue;
-			}
+	inet_ntop(AF_INET, &from.sin_addr, sfrom, sizeof(sfrom));
+	$IFTRACE(g_trace, "[%d]Got request code %#x, from %s:%d, %d octets", g_udp_sd, pdu->req, sfrom, ntohs(from.sin_port), buflen);
 
-		if ( pdu->proto != SVPN$K_PROTO_V1  )
-			{
-			$IFTRACE(g_trace, "[%d]Unsupported protocol version %d", g_udp_sd, pdu->proto);
-			continue;
-			}
+	/* Check length and magic prefix of the packet, just drop unrelated packets */
+	if ( (buflen < SVPN$SZ_PDUHDR) && (memcmp(pdu->magic, SVPN$T_MAZIC,  SVPN$SZ_MAZIC)) )
+		return	$LOG(STS$K_ERROR, "[%d]Drop request code %#x, from %s:%d, %d octets", g_udp_sd, pdu->req, buflen);
 
-		if ( pdu->req != SVPN$K_REQ_HELLO )
-			{
-			$LOG(STS$K_ERROR, "[%d]Ignored unhandled request from %s:%d, code=%#x", g_udp_sd, sfrom, ntohs(from.sin_port), pdu->req);
-			continue;
-			}
+	if ( pdu->proto != SVPN$K_PROTO_V1  )
+		return	$LOG(STS$K_ERROR, "[%d]Unsupported protocol version %d", g_udp_sd, pdu->proto);
 
-		ulen = sizeof(user);
-		if ( !(1 & tlv_get (pdu->data, retlen - SVPN$SZ_PDUHDR, SVPN$K_TAG_USER, &v_type, user, &ulen)) )
-			{
-			$LOG(STS$K_ERROR, "[%d]No USERNAME in request", g_udp_sd);
-			continue;
-			}
+	if ( pdu->req != SVPN$K_REQ_LOGIN )
+		return	$LOG(STS$K_ERROR, "[%d]Ignored unhandled request from %s:%d, code=%#x", g_udp_sd, sfrom, ntohs(from.sin_port), pdu->req);
 
-		$IFTRACE(g_trace, "[%d]Got HELLO from  %.*s@%s:%d, %d octets", g_udp_sd, pdu->req,
-			 ulen, user, sfrom, ntohs(from.sin_port), retlen);
+	/* Check  HMAC*/
+	if ( !(1 & hmac_check(pdu->digest, SVPN$SZ_DIGEST,
+			pdu, SVPN$SZ_HASHED, pdu->data, buflen - SVPN$SZ_PDUHDR, $ASCPTR(&g_auth), $ASCLEN(&g_auth),
+				NULL /* End-of-arguments marger !*/)) )
+		return	$LOG(STS$K_ERROR, "[%d]Hash checking error", g_udp_sd);
 
-		/* Prepare WELCOME answer:
-		 *	Generate Salt
-		 */
-		$IFTRACE(g_trace, "[%d]Prepare WELCOME for %.*s@%s:%d", g_udp_sd,ulen, user, sfrom, ntohs(from.sin_port));
+	ulen = sizeof(user);
+	if ( !(1 & tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_USER, &v_type, user, &ulen)) )
+		return	$LOG(STS$K_ERROR, "[%d]No USERNAME in request", g_udp_sd);
 
-		gen_salt(salt, sizeof(salt));
+	$IFTRACE(g_trace, "[%d]Got LOGIN from  %.*s@%s:%d, %d octets", g_udp_sd,
+		 ulen, user, sfrom, ntohs(from.sin_port), buflen);
 
-		bufp = pdu->data;	/* Form PDU with the options list ... */
-		bufsz = sizeof(buf) - (buflen = SVPN$SZ_PDUHDR);
 
-		if ( !(1 & (status = tlv_put (bufp, bufsz, SVPN$K_TAG_SALT, SVPN$K_BBLOCK, salt, SVPN$SZ_SALT, &adjlen))) )
-			$LOG(status, "[%d]Error processing request from %s:%d, code=%#x", sfrom, ntohs(from.sin_port), pdu->req);
+	/* So, authenticaion was successfull, now we can form client's option list and send ACCEPT;
+	 *	form PDU with the options list ...
+	 */
+	bufp = pdu->data;
+	bufsz = sizeof(buf) - (buflen = SVPN$SZ_PDUHDR);
+	pdu->req = SVPN$K_REQ_ACCEPT;
 
-		buflen += adjlen;
 
-		/* Send WELCOME ... */
-		pdu->req = SVPN$K_REQ_WELCOME;
-		if ( !(1 & xmit_pkt (g_udp_sd, buf, buflen, &from)) )
-			{
-			$LOG(STS$K_ERROR, "Error send WELCOME to %s:$d", sfrom, ntohs(from.sin_port));
-			continue;
-			}
+	/* Add configuration options for remote SVPN instance ... */
+	if ( !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_NET, SVPN$K_BBLOCK, $ASCPTR(&g_network), $ASCLEN(&g_network), &adjlen))) )
+		return	$LOG(status, "[%d]Error put attribute", g_udp_sd);
+	buflen += adjlen;
+	bufsz -= adjlen;
 
-		/* Wait for LOGIN ... */
-		$IFTRACE(g_trace, "[%d]Wait for LOGIN from %s:%d (timeout is %d msec) ...", g_udp_sd, sfrom, ntohs(from.sin_port), timespec2msec (&g_timers_set.t_io));
+	if ( !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_IP, SVPN$K_BBLOCK, $ASCPTR(&g_cliaddr), $ASCLEN(&g_cliaddr), &adjlen))) )
+		return	$LOG(status, "[%d]Error put attribute", g_udp_sd);
+	buflen += adjlen;
+	bufsz -= adjlen;
 
-		if ( !(1 & recv_pkt (g_udp_sd, buf, sizeof(buf), &g_timers_set.t_io, &from, &retlen)) )
-			{
-			$LOG(STS$K_WARN, "[%d]No LOGIN from %s:%d %d msec, cancel session setup", g_udp_sd, sfrom, ntohs(from.sin_port), timespec2msec (&g_timers_set.t_io));
-			continue;
-			}
+	if ( !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_ENC, SVPN$K_LONG, &g_enc, sizeof(g_enc), &adjlen))) )
+		return	$LOG(status, "[%d]Error put attribute", g_udp_sd);
+	buflen += adjlen;
+	bufsz -= adjlen;
 
-		/* Check length and magic prefix of the packet, just drop unrelated packets */
-		if ( (retlen < SVPN$SZ_PDUHDR) && (memcmp(pdu->magic, SVPN$T_MAZIC,  SVPN$SZ_MAZIC)) )
-			{
-			$LOG(STS$K_ERROR, "[%d]Drop request code %#x, from %s:%d, %d octets", g_udp_sd, pdu->req, sfrom, ntohs(from.sin_port), retlen);
-			continue;
-			}
 
-		if ( pdu->proto != SVPN$K_PROTO_V1  )
-			{
-			$LOG(STS$K_ERROR, "[%d]Unsupported protocol version=%d", g_udp_sd, pdu->proto);
-			continue;
-			}
+	tlv_dump(pdu->data, buflen - SVPN$SZ_PDUHDR);
 
-		if ( pdu->req != SVPN$K_REQ_LOGIN )
-			{
-			$LOG(STS$K_ERROR, "[%d]Ignored unexpected request from %s:%d, code=%#x", g_udp_sd, sfrom, ntohs(from.sin_port), pdu->req);
-			continue;
-			}
+	/* Generate  HMAC */
+	hmac_gen(pdu->digest, SVPN$SZ_DIGEST,
+			pdu, SVPN$SZ_HASHED, pdu->data, buflen - SVPN$SZ_PDUHDR, $ASCPTR(&g_auth), $ASCLEN(&g_auth),
+				NULL /* End-of-arguments marger !*/);
 
-		/* Process LOGIN request: compute local hash to compare with the pdu.digest */
-		SHA1Reset(&sha);	/* Compute HASH: PDU header (w/o digest field!) + PDU's payload + <username>:<password> */
-		SHA1Input(&sha, pdu, SVPN$SZ_HASHED);
-		SHA1Input(&sha, $ASCPTR(&g_auth), $ASCLEN(&g_auth));
-		SHA1Result(&sha);
+	if ( !(1 & xmit_pkt (g_udp_sd, buf, buflen, &from)) )
+		return	$LOG(STS$K_ERROR, "Error send ACCEPT to %s:$d", sfrom, ntohs(from.sin_port));
 
-		if ( memcmp(sha.Message_Digest, pdu->digest, SVPN$SZ_DIGEST) )
-			{
-			$LOG(STS$K_ERROR, "[%d]User '%.*s' authentication error", g_udp_sd, ulen, user);
-			continue;
-			}
-
-		/* So, authenticaion was successfull, now we can form client's option list and send ACCEPT;
-		 *	form PDU with the options list ...
-		 */
-		bufp = pdu->data;
-		bufsz = sizeof(buf) - (buflen = SVPN$SZ_PDUHDR);
-
-		if ( !(1 & (status = tlv_put (bufp, bufsz, SVPN$K_TAG_NET, SVPN$K_BBLOCK, $ASCPTR(&g_network), $ASCLEN(&g_network), &adjlen))) )
-			$LOG(status, "[%d]Error processing request from %s:%d, code=%#x", sfrom, ntohs(from.sin_port), pdu->req);
-
-		buflen += adjlen;
-
-		pdu->req = SVPN$K_REQ_ACCEPT;
-		SHA1Reset(&sha);	/* Compute HASH: PDU header (w/o digest field!) + PDU's payload + <username>:<password> */
-		SHA1Input(&sha, pdu, SVPN$SZ_HASHED);
-		SHA1Input(&sha, pdu->data, buflen - SVPN$SZ_PDUHDR);
-		SHA1Input(&sha, $ASCPTR(&g_auth), $ASCLEN(&g_auth));
-		SHA1Result(&sha);
-
-		memcpy(pdu->digest, sha.Message_Digest, SVPN$SZ_DIGEST);
-
-		if ( !(1 & xmit_pkt (g_udp_sd, buf, buflen, &from)) )
-			{
-			$LOG(STS$K_ERROR, "Error send ACCEPT to %s:$d", sfrom, ntohs(from.sin_port));
-			continue;
-			}
-		}
+	$IFTRACE(g_trace, "[%d]Sent ACCEPT to  %.*s@%s:%d, %d octets", g_udp_sd,
+		 ulen, user, sfrom, ntohs(from.sin_port), buflen);
 
 
 	return	STS$K_ERROR;

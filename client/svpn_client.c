@@ -277,6 +277,7 @@ char	ia [32] = {0}, pn [32]={0};
 unsigned short npn = 0;
 struct  sockaddr_in a = {0};
 
+	/* Parse server's IP and port */
 	if ( sscanf($ASCPTR(&g_server), "%32[^:\n]:%8[0-9]", ia, pn) )
 		{
 		if (  (npn = atoi(pn)) )
@@ -287,6 +288,7 @@ struct  sockaddr_in a = {0};
 		}
 	else	return	$LOG(STS$K_ERROR, "Illegal or illformed IP:Port (%.*s)", $ASC(&g_server));
 
+	/* Convert to internal representative for future use */
 	inet_ntop(AF_INET, &g_server_sk.sin_addr, ia, sizeof(ia));
 
 	$LOG(STS$K_INFO, "Server socket:%s:%d", ia, ntohs(g_server_sk.sin_port));
@@ -294,10 +296,10 @@ struct  sockaddr_in a = {0};
 
 	g_server_sk.sin_family = AF_INET;
 
+
+	/* Create UDP socket to be used for communicattion with server */
 	if ( 0 > (*sd = socket(AF_INET, SOCK_DGRAM, 0)) )
 		return	$LOG(STS$K_FATAL, "socket(), errno=%d", errno);
-
-
 
 	status = sizeof(struct sockaddr);
 	if ( 0 > (status = getsockname (*sd, &a,  (socklen_t *) &status)) )
@@ -311,7 +313,7 @@ struct  sockaddr_in a = {0};
 
 static	int	tun_init	(
 			int	*fd
-				)
+			)
 {
 struct ifreq ifr = {0};
 int	err;
@@ -731,21 +733,16 @@ static int	control	(void)
 {
 int	status, bufsz, adjlen = 0, buflen = 0, retlen = 0, v_type = 0, ulen = 0, plen = 0;
 struct pollfd pfd = {g_udp_sd, POLLIN, 0 };
-char buf[SVPN$SZ_IOBUF], l_salt[SVPN$SZ_SALT], digest[SVPN$SZ_DIGEST], *bufp, user[SVPN$SZ_USER], pass[SVPN$SZ_PASS];
+char buf[SVPN$SZ_IOBUF], digest[SVPN$SZ_DIGEST], *bufp, user[SVPN$SZ_USER], pass[SVPN$SZ_PASS];
 SVPN_PDU *pdu = (SVPN_PDU *) buf;
 SHA1Context	sha = {0};
 
-	/* Generate our own Salt ... */
-	rand_octets (l_salt, sizeof(l_salt));
-
-
-
-	/* Send HELLO from <USER> request ...
+	/* Send LOGIN <user> request
 	 *	pdu->digest = sha(header, salt, payload);
 	 */
 	memcpy(pdu->magic, SVPN$T_MAZIC, SVPN$SZ_MAZIC);
 	pdu->proto = SVPN$K_PROTO_V1;
-	pdu->req = SVPN$K_REQ_HELLO;
+	pdu->req = SVPN$K_REQ_LOGIN;
 	buflen = SVPN$SZ_PDUHDR;
 
 	tlv_put (pdu->data, SVPN$SZ_USER, SVPN$K_TAG_USER, SVPN$K_BBLOCK, $ASCPTR(&g_user), $ASCLEN(&g_user), &adjlen);
@@ -753,68 +750,14 @@ SHA1Context	sha = {0};
 
 	/* Compute HMAC*/
 	hmac_gen(pdu->digest, SVPN$SZ_DIGEST,
-			pdu, SVPN$SZ_HASHED, l_salt, sizeof(l_salt), pdu->data, buflen - SVPN$SZ_PDUHDR,
+			pdu, SVPN$SZ_HASHED, pdu->data, buflen - SVPN$SZ_PDUHDR, $ASCPTR(&g_auth), $ASCLEN(&g_auth),
 				NULL /* End-of-arguments marger !*/);
-	memcpy(digest, pdu->digest, SVPN$SZ_DIGEST);
-
-	if ( !(1 & xmit_pkt (g_udp_sd, buf, buflen, &g_server_sk)) )
-		return	$LOG(STS$K_ERROR, "[#%d]Error send HELLO to %.*s", g_udp_sd, $ASC(&g_server));
-
-	$IFTRACE(g_trace, "[#%d]Sent HELLO to %.*s, %d octets", g_udp_sd, $ASC(&g_server), buflen);
-
-
-
-
-
-	/* Wait for WELCOME + Salt ... */
-	$IFTRACE(g_trace, "[#%d]Wait for WELCOME from %.*s (timeout is %d msec) ...", g_udp_sd, $ASC(&g_server), timespec2msec (&g_timers_set.t_io));
-
-	if ( !(1 & recv_pkt (g_udp_sd, buf, sizeof(buf), &g_timers_set.t_io, &g_server_sk, &retlen)) )
-		return	$LOG(STS$K_WARN, "[#%d]No WELCOME from %.*s in %d msec, cancel session setup", g_udp_sd, $ASC(&g_server), timespec2msec (&g_timers_set.t_io));
-
-	/* Check length and magic prefix of the packet, just drop unrelated packets */
-	if ( (retlen < SVPN$SZ_PDUHDR) && (memcmp(pdu->magic, SVPN$T_MAZIC,  SVPN$SZ_MAZIC)) )
-		return	$LOG(STS$K_ERROR, "[#%d]Drop request code %#x, from %.*s, length=%d octets", g_udp_sd, pdu->req, $ASC(&g_server), retlen);
-
-	if ( pdu->proto != SVPN$K_PROTO_V1  )
-		return	$LOG(STS$K_ERROR, "[#%d]Unsupported protocol version=%d", g_udp_sd, pdu->proto);
-
-	if ( pdu->req != SVPN$K_REQ_WELCOME )
-		return	$LOG(STS$K_ERROR, "[#%d]Ignored unexpected request from %.*s, code=%#x", g_udp_sd, $ASC(&g_server), pdu->req);
-
-	/* Process WELCOME response from server request:
-	 *	check HMAC,
-	 *	extract Salt
-	 */
-	if ( !(1 & hmac_check(digest, SVPN$SZ_DIGEST,
-		pdu, SVPN$SZ_HASHED, digest, SVPN$SZ_DIGEST, pdu->data, buflen - SVPN$SZ_PDUHDR,
-			NULL /* End-of-arguments marger !*/)) )
-		return	$LOG(STS$K_ERROR, "[#%d]Has mismatch", g_udp_sd);
-
-	adjlen = SVPN$SZ_SALT;
-	if ( !(1 & tlv_get (pdu->data, retlen - SVPN$SZ_PDUHDR, SVPN$K_TAG_SALT, &v_type, g_salt, &adjlen)) )
-		return	$LOG(STS$K_ERROR, "[%d]No Salt in request", g_udp_sd);
-
-
-
-
-
-	/* Prepare & send LOGIN request ... */
-	memcpy(pdu->magic, SVPN$T_MAZIC, SVPN$SZ_MAZIC);
-	pdu->proto = SVPN$K_PROTO_V1;
-	pdu->req = SVPN$K_REQ_LOGIN;
-	buflen = SVPN$SZ_PDUHDR;
-
-	/* Compute HMAC*/
-	hmac_gen(pdu->digest, SVPN$SZ_DIGEST,
-			pdu, SVPN$SZ_HASHED, g_salt, sizeof(g_salt), pdu->data, buflen - SVPN$SZ_PDUHDR, $ASCPTR(&g_auth), $ASCLEN(&g_auth),
-				NULL /* End-of-arguments marger !*/);
-	memcpy(digest, pdu->digest, SVPN$SZ_DIGEST);
 
 	if ( !(1 & xmit_pkt (g_udp_sd, buf, buflen, &g_server_sk)) )
 		return	$LOG(STS$K_ERROR, "[#%d]Error send HELLO to %.*s", g_udp_sd, $ASC(&g_server));
 
 	$IFTRACE(g_trace, "[#%d]Sent LOGIN to %.*s, %d octets", g_udp_sd, $ASC(&g_server), buflen);
+
 
 
 
@@ -836,17 +779,20 @@ SHA1Context	sha = {0};
 	if ( pdu->req != SVPN$K_REQ_ACCEPT )
 		return	$LOG(STS$K_ERROR, "[#%d]Ignored unexpected request from %.*s, code=%#x", g_udp_sd, $ASC(&g_server), pdu->req);
 
-	/* Process ACCEPT  request: compute local hash to compare with the pdu.digest */
-	SHA1Reset(&sha);	/* Compute HASH: PDU header (w/o digest field!) + PDU's payload + <username>:<password> */
-	SHA1Input(&sha, pdu, SVPN$SZ_HASHED);
-	SHA1Input(&sha, pdu->data, retlen - SVPN$SZ_PDUHDR);
-	SHA1Input(&sha, $ASCPTR(&g_auth), $ASCLEN(&g_auth));
-	SHA1Result(&sha);
+	$IFTRACE(g_trace, "[%d]Got request code %#x, from %.*s, %d octets", g_udp_sd, pdu->req, $ASC(&g_server), retlen);
 
-	if ( memcmp(sha.Message_Digest, pdu->digest, SVPN$SZ_DIGEST) )
+	/* Process ACCEPT  request: check HMAC */
+	if ( !(1 & hmac_check(pdu->digest, SVPN$SZ_DIGEST,
+			pdu, SVPN$SZ_HASHED, pdu->data, retlen - SVPN$SZ_PDUHDR, $ASCPTR(&g_auth), $ASCLEN(&g_auth),
+				NULL /* End-of-arguments marger !*/)) )
 		return	$LOG(STS$K_ERROR, "[%d]Hash checking error", g_udp_sd);
 
+
+
 	/* Extract attributes from ACCEPT packet */
+	tlv_dump(pdu->data, retlen - SVPN$SZ_PDUHDR);
+
+
 
 	return	$LOG(STS$K_SUCCESS, "Session is establied");
 }
