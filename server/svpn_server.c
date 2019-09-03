@@ -205,6 +205,7 @@ static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
 	g_enc = SVPN$K_ENC_NONE,	/* Encryption mode, default is none	*/
 	g_threads = 3,			/* A size of the worker crew threads	*/
 	g_udp_sd = -1,
+	g_tun_fd = -1,
 	g_mss = 0,			/* MTU for datagram			*/
 	g_mtu = 0;			/* MSS for TCP/SYN			*/
 
@@ -212,9 +213,13 @@ static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
 static const struct timespec g_locktmo = {5, 0};/* A timeout for thread's wait lock	*/
 ASC	g_tun = {$ASCINI("tunX:")},	/* OS specific TUN device name		*/
 	g_logfspec = {0}, g_confspec = {0},
-	g_bind = {0}, g_cliname = {0}, g_auth = {0}, g_network = {0}, g_cliaddr = {0},
+	g_bind = {0}, g_cliname = {0}, g_auth = {0},
+	g_network = {$ASCINI("192.168.1.0/24")}, g_cliaddr = {$ASCINI("192.168.1.2")}, g_locaddr = {$ASCINI("192.168.1.1")},
 	g_timers = {$ASCINI("7, 300, 13, 15")},
-	g_cretun = {0}, g_linkup = {0}, g_linkdown = {0};
+	g_climsg = {0}, g_linkup = {0}, g_linkdown = {0};
+
+
+struct in_addr g_ia_network = {0}, g_ia_local = {0}, g_ia_cliaddr = {0} , g_netmask = {-1};
 
 struct sockaddr_in g_server_sk = {.sin_family = AF_INET};
 
@@ -240,6 +245,8 @@ const OPTS optstbl [] =		/* Configuration options		*/
 	{$ASCINI("logfile"),	&g_logfspec, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("devtun"),	&g_tun, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("cliname"),	&g_cliname, ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("cliaddr"),	&g_cliaddr, ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("locaddr"),	&g_locaddr, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("auth"),	&g_auth, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("network"),	&g_network, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("timers"),	&g_timers, ASC$K_SZ,	OPTS$K_STR},
@@ -255,7 +262,7 @@ const OPTS optstbl [] =		/* Configuration options		*/
 static	int	config_process	(void)
 {
 int	status = STS$K_SUCCESS;
-char	*cp, *saveptr = NULL, *endptr = NULL;
+char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 32 ], mask [ 32];
 
 	/* /TIMERS*/
 	$ASCLEN(&g_timers) = __util$uncomment ($ASCPTR(&g_timers), $ASCLEN(&g_timers), '!');
@@ -288,7 +295,17 @@ char	*cp, *saveptr = NULL, *endptr = NULL;
 			}
 		}
 
-	if ( $ASCLEN(&g_enc))
+	sscanf($ASCPTR(&g_network), "%[^/\n]/%[^\n]" , ia, mask);
+	if ( !inet_pton(AF_INET, ia, &g_ia_network) )
+		return	$LOG(STS$K_ERROR, "Error converting IA=%s from %.*s", ia, $ASCPTR(&g_network));
+
+	sscanf($ASCPTR(&g_cliaddr), "%[^/\n]/%[^\n]" , ia, mask);
+	if ( !inet_pton(AF_INET, ia, &g_ia_cliaddr) )
+		return	$LOG(STS$K_ERROR, "Error converting IA=%s from %.*s", ia, $ASCPTR(&g_cliaddr));
+
+	sscanf($ASCPTR(&g_locaddr), "%[^/\n]/%[^\n]" , ia, mask);
+	if ( !inet_pton(AF_INET, ia, &g_ia_local) )
+		return	$LOG(STS$K_ERROR, "Error converting IA=%s from %.*s", ia, $ASCPTR(&g_locaddr));
 
 	return	STS$K_SUCCESS;
 }
@@ -351,9 +368,110 @@ socklen_t slen = sizeof(struct sockaddr);
 
 
 
+static inline int	set_tun_state	(
+		int	up_down
+		)
+{
+struct ifreq ifr = {0};
+static int	sd = -1;
+
+	if ( sd < 0 )
+		{
+		if ( 0 > (sd = socket(AF_INET, SOCK_DGRAM, 0)) )
+			return	$LOG(STS$K_FATAL, "socket(), errno=%d", errno);
+		}
+
+	/* DOWN the TUN/TAP device */
+	if( ioctl(sd, SIOCGIFFLAGS, &ifr) )
+		$LOG(STS$K_ERROR, "ioctl(%s)->%d", ifr.ifr_name, errno);
+	else	{
+		if ( up_down )
+			ifr.ifr_ifru.ifru_flags |= IFF_UP;
+		else	ifr.ifr_ifru.ifru_flags &= (~IFF_UP);
+
+		if( ioctl(sd, SIOCSIFFLAGS, &ifr) )
+			$LOG(STS$K_ERROR, "ioctl(%s, SIOCSIFFLAGS)->%d", ifr.ifr_name, errno);
+		}
+
+	$IFTRACE(g_trace, "set %s to %s", ifr.ifr_name, up_down ? "UP" :  "DOWN");
+
+	return	STS$K_SUCCESS;
+}
+
 
 
 static	int	tun_init	(
+			int	*fd
+				)
+{
+struct ifreq ifr = {0};
+int	err, sd = -1;
+struct sockaddr_in inaddr = {0};
+
+	/* Flags: IFF_TUN   - TUN device (no Ethernet headers)
+	*        IFF_TAP   - TAP device
+	*
+	*        IFF_NO_PI - Do not provide packet information
+	*        IFF_MULTI_QUEUE - Create a queue of multiqueue device
+	*/
+	ifr.ifr_flags = IFF_TAP | IFF_NO_PI | IFF_MULTI_QUEUE;
+	strncpy(ifr.ifr_name, $ASCPTR(&g_tun), IFNAMSIZ);
+
+	/* Allocate new /devtunX ... */
+	if ( 0 > (*fd = open("/dev/net/tun", O_RDWR)) )
+		return	$LOG(STS$K_ERROR, "open(/dev/net/tun), errno=%d", errno);
+
+	if ( err = ioctl(*fd, TUNSETIFF, (void *)&ifr) )
+		{
+		close(*fd);
+		return	$LOG(STS$K_ERROR, "ioctl(TUNSETIFF)->%d, errno=%d", err, errno);
+		}
+
+	/* Make this device persisten ... */
+	if( err = ioctl(*fd, TUNSETPERSIST, 1) )
+		{
+		close(*fd);
+		return	$LOG(STS$K_ERROR, "ioctl(TUNSETPERSIST)->%d, errno=%d", err, errno);
+		}
+
+	/* Set initial state of the TUN - DOWN ... */
+	if ( 0 > (sd = socket(AF_INET, SOCK_DGRAM, 0)) )
+		return	$LOG(STS$K_FATAL, "socket(), errno=%d", errno);
+
+	if( err = ioctl(sd, SIOCGIFFLAGS, &ifr) )
+		{
+		close(*fd);
+		return	$LOG(STS$K_ERROR, "ioctl(%s, SIOCGIFFLAGS)->%d, errno=%d", ifr.ifr_name, err,  errno);
+		}
+
+
+	ifr.ifr_ifru.ifru_flags &= (~IFF_UP);
+
+	if ( err = ioctl(sd, SIOCSIFFLAGS, &ifr) )
+		{
+		close(*fd);
+		$LOG(STS$K_ERROR, "ioctl(SIOCSIFFLAGS)->%d", err, errno);
+		}
+
+
+	/* Assign IP address ... */
+	inaddr.sin_addr = g_ia_local;
+	inaddr.sin_family = AF_INET;
+
+	memcpy(&ifr.ifr_addr, &inaddr, sizeof(struct sockaddr));
+
+	if ( err = ioctl(sd, SIOCSIFADDR, (void *)&ifr) )
+		{
+		close(*fd);
+		return	$LOG(STS$K_ERROR, "ioctl(SIOCSIFADDR)->%d, errno=%d", err, errno);
+		}
+
+	return	STS$K_SUCCESS;
+}
+
+
+
+static	int	tun_open	(
 			int	*fd
 				)
 {
@@ -380,6 +498,7 @@ int	err;
 
 	return	STS$K_SUCCESS;
 }
+
 
 
 
@@ -831,12 +950,34 @@ SHA1Context	sha = {0};
 
 
 	/* Add configuration options for remote SVPN instance ... */
-	if ( !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_NET, SVPN$K_BBLOCK, $ASCPTR(&g_network), $ASCLEN(&g_network), &adjlen))) )
+	if ( $ASCLEN(&g_cliname) )
+		{
+		if ( !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_NAME, SVPN$K_BBLOCK, $ASCPTR(&g_cliname), $ASCLEN(&g_cliname), &adjlen))) )
+			return	$LOG(status, "[%d]Error put attribute", g_udp_sd);
+		buflen += adjlen;
+		bufsz -= adjlen;
+		}
+
+	if ( $ASCLEN(&g_climsg) )
+		{
+		if (  !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_MSG, SVPN$K_BBLOCK, $ASCPTR(&g_climsg), $ASCLEN(&g_climsg), &adjlen))) )
+			return	$LOG(status, "[%d]Error put attribute", g_udp_sd);
+
+		buflen += adjlen;
+		bufsz -= adjlen;
+		}
+
+	if ( !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_NET, SVPN$K_IP, &g_network, sizeof(struct in_addr), &adjlen))) )
 		return	$LOG(status, "[%d]Error put attribute", g_udp_sd);
 	buflen += adjlen;
 	bufsz -= adjlen;
 
-	if ( !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_IP, SVPN$K_BBLOCK, $ASCPTR(&g_cliaddr), $ASCLEN(&g_cliaddr), &adjlen))) )
+	if ( !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_NETMASK, SVPN$K_IP, &g_netmask, sizeof(struct in_addr), &adjlen))) )
+		return	$LOG(status, "[%d]Error put attribute", g_udp_sd);
+	buflen += adjlen;
+	bufsz -= adjlen;
+
+	if ( !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_CLIADDR, SVPN$K_IP, &g_ia_cliaddr, sizeof(struct in_addr), &adjlen))) )
 		return	$LOG(status, "[%d]Error put attribute", g_udp_sd);
 	buflen += adjlen;
 	bufsz -= adjlen;
@@ -906,6 +1047,11 @@ pthread_t	tid;
 	/* Additionaly parse and validate configuration options  */
 	config_process();
 
+	/* Open channel to TUN device */
+	if ( !(1 & (status = tun_init(&g_tun_fd))) )
+		return	g_exit_flag = $LOG(STS$K_ERROR, "Error allocating TUN device");
+
+
 	/* Initialize UDP socket */
 	if ( !(1 & udp_init (&g_udp_sd)) )
 		return	$LOG(STS$K_ERROR, "Aborted");
@@ -914,11 +1060,13 @@ pthread_t	tid;
 	/* Just for fun */
 	init_sig_handler ();
 
-#if 0
+#if	1
 	/* Create crew workers */
 	for ( int i = 0; i < g_threads; i++ )
+		{
 		if ( status = pthread_create(&tid, NULL, worker, NULL) )
 			return	$LOG(STS$K_FATAL, "Cannot start worker thread, pthread_create()->%d, errno=%d", status, errno);
+		}
 #endif
 
 	/**/

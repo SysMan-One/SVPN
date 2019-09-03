@@ -216,9 +216,11 @@ ASC	g_tun = {$ASCINI("tun33")},	/* OS specific TUN device name		*/
 	g_auth = {0}, g_user = {0},
 	g_timers = {0},
 	g_linkup = {0}, g_linkdown = {0},
-	g_server = {0};
+	g_server = {0}, g_cliname = {0}, g_climsg = {0};
 
 char	g_salt[SVPN$SZ_SALT];
+
+struct in_addr g_ia_network = {0}, g_ia_local = {0}, g_ia_cliaddr = {0}, g_ia_netmask = {0};
 
 struct sockaddr_in g_server_sk = {.sin_family = AF_INET};
 
@@ -731,11 +733,10 @@ va_list ap;
  */
 static int	control	(void)
 {
-int	status, bufsz, adjlen = 0, buflen = 0, retlen = 0, v_type = 0, ulen = 0, plen = 0;
-struct pollfd pfd = {g_udp_sd, POLLIN, 0 };
-char buf[SVPN$SZ_IOBUF], digest[SVPN$SZ_DIGEST], *bufp, user[SVPN$SZ_USER], pass[SVPN$SZ_PASS];
+int	status, adjlen = 0, buflen = 0, v_type = 0;
+char buf[SVPN$SZ_IOBUF];
 SVPN_PDU *pdu = (SVPN_PDU *) buf;
-SHA1Context	sha = {0};
+
 
 	/* Send LOGIN <user> request
 	 *	pdu->digest = sha(header, salt, payload);
@@ -766,12 +767,12 @@ SHA1Context	sha = {0};
 	/* Wait for ACCEPT ... */
 	$IFTRACE(g_trace, "[#%d]Wait for ACCEPT from %.*s (timeout is %d msec) ...", g_udp_sd, $ASC(&g_server), timespec2msec (&g_timers_set.t_io));
 
-	if ( !(1 & recv_pkt (g_udp_sd, buf, sizeof(buf), &g_timers_set.t_io, &g_server_sk, &retlen)) )
+	if ( !(1 & recv_pkt (g_udp_sd, buf, sizeof(buf), &g_timers_set.t_io, &g_server_sk, &buflen)) )
 		return	$LOG(STS$K_WARN, "[#%d]No ACCEPT from %.*s in %d msec, cancel session setup", g_udp_sd, $ASC(&g_server), timespec2msec (&g_timers_set.t_io));
 
 	/* Check length and magic prefix of the packet, just drop unrelated packets */
-	if ( (retlen < SVPN$SZ_PDUHDR) && (memcmp(pdu->magic, SVPN$T_MAZIC,  SVPN$SZ_MAZIC)) )
-		return	$LOG(STS$K_ERROR, "[#%d]Drop request code %#x, from %.*s, length=%d octets", g_udp_sd, pdu->req, $ASC(&g_server), retlen);
+	if ( (buflen < SVPN$SZ_PDUHDR) && (memcmp(pdu->magic, SVPN$T_MAZIC,  SVPN$SZ_MAZIC)) )
+		return	$LOG(STS$K_ERROR, "[#%d]Drop request code %#x, from %.*s, length=%d octets", g_udp_sd, pdu->req, $ASC(&g_server), buflen);
 
 	if ( pdu->proto != SVPN$K_PROTO_V1  )
 		return	$LOG(STS$K_ERROR, "[#%d]Unsupported protocol version=%d", g_udp_sd, pdu->proto);
@@ -779,20 +780,46 @@ SHA1Context	sha = {0};
 	if ( pdu->req != SVPN$K_REQ_ACCEPT )
 		return	$LOG(STS$K_ERROR, "[#%d]Ignored unexpected request from %.*s, code=%#x", g_udp_sd, $ASC(&g_server), pdu->req);
 
-	$IFTRACE(g_trace, "[%d]Got request code %#x, from %.*s, %d octets", g_udp_sd, pdu->req, $ASC(&g_server), retlen);
+	$IFTRACE(g_trace, "[%d]Got request code %#x, from %.*s, %d octets", g_udp_sd, pdu->req, $ASC(&g_server), buflen);
 
 	/* Process ACCEPT  request: check HMAC */
 	if ( !(1 & hmac_check(pdu->digest, SVPN$SZ_DIGEST,
-			pdu, SVPN$SZ_HASHED, pdu->data, retlen - SVPN$SZ_PDUHDR, $ASCPTR(&g_auth), $ASCLEN(&g_auth),
+			pdu, SVPN$SZ_HASHED, pdu->data, buflen - SVPN$SZ_PDUHDR, $ASCPTR(&g_auth), $ASCLEN(&g_auth),
 				NULL /* End-of-arguments marger !*/)) )
 		return	$LOG(STS$K_ERROR, "[%d]Hash checking error", g_udp_sd);
 
-
+	tlv_dump(pdu->data, buflen - SVPN$SZ_PDUHDR);
 
 	/* Extract attributes from ACCEPT packet */
-	tlv_dump(pdu->data, retlen - SVPN$SZ_PDUHDR);
+	adjlen = ASC$K_SZ;
+	if ( !(1 & tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_NAME, &v_type, $ASCPTR(&g_cliname), &adjlen)) )
+		$LOG(STS$K_WARN, "[%d]No attribute %#x", g_udp_sd, SVPN$K_TAG_NAME);
+
+	$ASCLEN(&g_cliname) = (unsigned char) adjlen;
+
+	adjlen = ASC$K_SZ;
+	if ( (1 & tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_MSG, &v_type, $ASCPTR(&g_climsg), &adjlen)) )
+		{
+		$ASCLEN(&g_cliname) = (unsigned char) adjlen;
+		$LOG(STS$K_INFO, "[%d]Gotta message from server : %.*s", g_udp_sd, $ASC(&g_climsg));
+		}
+
+	adjlen = sizeof(g_ia_network);
+	if ( !(1 & tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_NET, &v_type, &g_ia_network, &adjlen)) )
+		return	$LOG(STS$K_ERROR, "[%d]Error get attribute", g_udp_sd);
+
+	adjlen = sizeof(g_ia_netmask);
+	if ( !(1 & tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_NETMASK, &v_type, &g_ia_netmask, &adjlen)) )
+		return	$LOG(STS$K_ERROR, "[%d]Error get attribute", g_udp_sd);
+
+	adjlen = sizeof(g_ia_cliaddr);
+	if ( !(1 & tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_CLIADDR, &v_type, &g_ia_cliaddr, &adjlen)) )
+		return	$LOG(STS$K_ERROR, "[%d]Error get attribute", g_udp_sd);
 
 
+	adjlen = sizeof(g_enc);
+	if ( !(1 & (tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_ENC, &v_type, &g_enc, &adjlen))) )
+		$LOG(STS$K_WARN, "[%d]No attribute %#x", g_udp_sd, SVPN$K_TAG_ENC);
 
 	return	$LOG(STS$K_SUCCESS, "Session is establied");
 }

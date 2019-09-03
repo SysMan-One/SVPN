@@ -58,10 +58,10 @@ enum	{
 };
 
 enum	{
-	SVPN$K_TAG_NAME = 0,	/* BBLOCK/ASCII	*/
+	SVPN$K_TAG_NAME = 1,	/* BBLOCK/ASCII	*/
 	SVPN$K_TAG_NET,		/* in_addr	*/
-	SVPN$K_TAG_MASK,	/* in_addr	*/
-	SVPN$K_TAG_IP,		/* in_addr	*/
+	SVPN$K_TAG_NETMASK,	/* in_addr	*/
+	SVPN$K_TAG_CLIADDR,	/* in_addr	*/
 	SVPN$K_TAG_IDLE,	/* WORD		*/
 	SVPN$K_TAG_KEEPALIVE,	/* WORD		*/
 	SVPN$K_TAG_TOTAL,	/* WORD		*/
@@ -69,7 +69,7 @@ enum	{
 	SVPN$K_TAG_TRACE,	/* OCTET	*/
 	SVPN$K_TAG_MSG,		/* BBLOCK/ASCII	*/
 	SVPN$K_TAG_USER,	/* BBLOCK/ASCII	*/
-	SVPN$K_TAG_PASS		/* BBLOCK	*/
+
 };
 
 
