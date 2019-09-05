@@ -75,7 +75,9 @@ enum	{
 
 enum	{
 	SVPN$K_STATECTL,	/* VPN State - waiting for remote/peer initial request */
+	SVPN$K_STATEON,		/* New session has been etsablished	*/
 	SVPN$K_STATETUN,	/* In data tunneling mode	*/
+	SVPN$K_STATEOFF		/* Data channel is need to be closed */
 };
 
 
@@ -90,6 +92,10 @@ enum	{			/* Signaling channel requests */
 	SVPN$K_REQ_PING,
 	SVPN$K_REQ_PONG
 };
+
+
+
+
 
 
 #pragma	pack	(push, 1)
@@ -124,7 +130,6 @@ typedef struct	__svpn_tlv
 		unsigned long long q_val[0];
 	};
 } SVPN_TLV;
-
 
 enum	{
 	SVPN$K_BBLOCK = 0,		/* Octets block			*/

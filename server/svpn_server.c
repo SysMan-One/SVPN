@@ -119,6 +119,8 @@
 #include	<net/if.h>
 #include	<linux/if.h>
 #include	<linux/if_tun.h>
+#include	<linux/limits.h>
+#include	<stdatomic.h>
 
 #endif
 
@@ -221,7 +223,7 @@ ASC	g_tun = {$ASCINI("tunX:")},	/* OS specific TUN device name		*/
 
 struct in_addr g_ia_network = {0}, g_ia_local = {0}, g_ia_cliaddr = {0} , g_netmask = {-1};
 
-struct sockaddr_in g_server_sk = {.sin_family = AF_INET};
+struct sockaddr_in g_server_sk = {.sin_family = AF_INET}, g_client_sk = {.sin_family = AF_INET};
 
 					/* Structure to keep timers information */
 typedef	struct __svpn_timers__	{
@@ -237,6 +239,17 @@ typedef	struct __svpn_timers__	{
 
 static	SVPN_TIMERS	g_timers_set = { {7, 0}, {300, 0}, {13, 0}, {15, 0}};
 
+
+typedef struct	__svpn_stat
+	{
+	atomic_int
+		tunrd,
+		tunwr,
+		netrd,
+		netwr;
+} SVPN_STAT;
+SVPN_STAT	g_stat = {0};
+
 const OPTS optstbl [] =		/* Configuration options		*/
 {
 	{$ASCINI("config"),	&g_confspec, ASC$K_SZ,	OPTS$K_CONF},
@@ -246,6 +259,7 @@ const OPTS optstbl [] =		/* Configuration options		*/
 	{$ASCINI("devtun"),	&g_tun, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("cliname"),	&g_cliname, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("cliaddr"),	&g_cliaddr, ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("climsg"),	&g_climsg, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("locaddr"),	&g_locaddr, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("auth"),	&g_auth, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("network"),	&g_network, ASC$K_SZ,	OPTS$K_STR},
@@ -254,9 +268,34 @@ const OPTS optstbl [] =		/* Configuration options		*/
 	{$ASCINI("threads"),	&g_threads,	0,	OPTS$K_INT},
 	{$ASCINI("linkup"),	&g_linkup, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("linkdown"),	&g_linkdown, ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("MTU"),	&g_mtu,	0,		OPTS$K_INT},
+	{$ASCINI("MSS"),	&g_mss,	0,		OPTS$K_INT},
 
 	OPTS_NULL
 };
+
+
+int	exec_script	(
+		ASC	*script
+		)
+{
+int	status;
+char	cmd[NAME_MAX], ia[32];
+
+	if ( !$ASCLEN(script) )	/* Nothing to do */
+		return	STS$K_SUCCESS;
+
+	sprintf(cmd, "%.*s %s:%d", $ASC(script),
+		inet_ntop(AF_INET, &g_client_sk.sin_addr, ia, sizeof(ia)),
+		ntohs(g_client_sk.sin_port));
+
+	$IFTRACE(g_trace, "Executing %s ...", cmd);
+
+	if ( status = system(cmd) )
+		return $LOG(STS$K_ERROR, "system(%s)->%d, errno=%d", cmd, status, errno);
+
+	return	STS$K_SUCCESS;
+}
 
 
 static	int	config_process	(void)
@@ -800,7 +839,7 @@ struct pollfd pfd[] = {{g_udp_sd, POLLIN,0 }, {0, POLLIN, 0}};
 	$LOG(STS$K_INFO, "Starting ...");
 
 	/* Open channel to TUN device */
-	if ( !(1 & (status = tun_init(&td))) )
+	if ( !(1 & (status = tun_open(&td))) )
 		return	g_exit_flag = $LOG(STS$K_ERROR, "Error allocating TUN device");
 
 	/* We suppose to be use poll() on the TUN and UDP channels to performs
@@ -1001,8 +1040,10 @@ SHA1Context	sha = {0};
 	$IFTRACE(g_trace, "[%d]Sent ACCEPT to  %.*s@%s:%d, %d octets", g_udp_sd,
 		 ulen, user, sfrom, ntohs(from.sin_port), buflen);
 
+	/* Store client IP for future use */
+	g_client_sk = from;
 
-	return	STS$K_ERROR;
+	return	STS$K_SUCCESS;
 }
 
 
@@ -1023,9 +1064,9 @@ SHA1Context	sha = {0};
 
 int	main	(int argc, char **argv)
 {
-int	status;
-
+int	status, idle_count;
 pthread_t	tid;
+SVPN_STAT	l_stat = {0};
 
 	$LOG(STS$K_INFO, "Rev: " __IDENT__ "/"  __ARCH__NAME__   ", (built  at "__DATE__ " " __TIME__ " with CC " __VERSION__ ")");
 
@@ -1070,10 +1111,33 @@ pthread_t	tid;
 #endif
 
 	/**/
-	while ( !g_exit_flag )
+	for ( idle_count = 0; !g_exit_flag; )
 		{
 		if ( g_state == SVPN$K_STATECTL )
-			control ();
+			{
+			if ( 1 & control () )
+				{
+				// g_state = SVPN$K_STATEON;
+				}
+			}
+
+		if ( g_state == SVPN$K_STATEON )
+			{
+			exec_script(&g_linkup);
+			/* Send signal to the workers ... */
+
+			g_state = SVPN$K_STATETUN;
+			}
+
+		if ( g_state == SVPN$K_STATEOFF )
+			{
+			set_tun_state(0);	/* Down the tunX */
+
+			exec_script(&g_linkdown);
+			/* Send signal to the workers ... */
+
+			g_state = SVPN$K_STATECTL;
+			}
 
 
 		status = 3;
