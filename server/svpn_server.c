@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNSRV"
-#define	__IDENT__	"X.00-00"
-#define	__REV__		"0.0.00"
+#define	__IDENT__	"X.00-01"
+#define	__REV__		"0.0.01"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -200,6 +200,8 @@ static const	ASC	__ident__ = {$ASCINI(__IDENT__ "/"  __ARCH__NAME__   "(built at
 
 /* Global configuration parameters */
 static	const	int slen = sizeof(struct sockaddr), one = 1, off = 0;
+static const char magic [SVPN$SZ_MAGIC] = {SVPN$T_MAGIC};
+static const unsigned long long *magic64 = (unsigned long long *) &magic;
 
 static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
 	g_state = SVPN$K_STATECTL,	/* Initial state for SVPN-Server	*/
@@ -419,6 +421,8 @@ static int	sd = -1;
 		if ( 0 > (sd = socket(AF_INET, SOCK_DGRAM, 0)) )
 			return	$LOG(STS$K_FATAL, "socket(), errno=%d", errno);
 		}
+
+	strncpy(ifr.ifr_name, $ASCPTR(&g_tun), IFNAMSIZ);
 
 	/* DOWN the TUN/TAP device */
 	if( ioctl(sd, SIOCGIFFLAGS, &ifr) )
@@ -833,13 +837,17 @@ int	i;
 
 static int	worker	(void)
 {
-int	status, td = -1;
-struct pollfd pfd[] = {{g_udp_sd, POLLIN,0 }, {0, POLLIN, 0}};
+int	rc, td = -1;
+struct pollfd pfd[] = {{g_udp_sd, POLLIN, 0 }, {0, POLLIN, 0}};
+struct	sockaddr_in rsock = {0};
+char	buf [SVPN$SZ_IOBUF];
+SVPN_PDU *pdu = (SVPN_PDU *) buf;
+int	slen = sizeof(struct sockaddr_in);
 
 	$LOG(STS$K_INFO, "Starting ...");
 
 	/* Open channel to TUN device */
-	if ( !(1 & (status = tun_open(&td))) )
+	if ( !(1 & (rc = tun_open(&td))) )
 		return	g_exit_flag = $LOG(STS$K_ERROR, "Error allocating TUN device");
 
 	/* We suppose to be use poll() on the TUN and UDP channels to performs
@@ -849,15 +857,96 @@ struct pollfd pfd[] = {{g_udp_sd, POLLIN,0 }, {0, POLLIN, 0}};
 
 	$LOG(STS$K_INFO, "[#%d-#%d]Main loop ...", td, g_udp_sd);
 
-	while ( !g_exit_flag )
+	while  ( !g_exit_flag )
 		{
-		status = 3;
+		/* Wait Input events from TUN or UDP device ... */
+#ifdef WIN32
+		if( 0 >  (rc = WSAPoll(&pfd, 2, timespec2msec (delta))) && (__ba_errno__ != WSAEINTR) )
+#else
+		if( 0 >  (rc = poll(&pfd, 2, timespec2msec (&g_timers_set.t_io))) && (__ba_errno__ != EINTR) )
+#endif // WIN32
+			return	$LOG(STS$K_ERROR, "[#%d-#%d]poll()->%d, errno=%d", td, g_udp_sd, rc, __ba_errno__);
 
-		#ifdef WIN32
-			Sleep(status * 1000);
-		#else
-			for (; status = sleep(status); );
-		#endif // WIN32
+
+		if ( !rc )	/* Nothing to do */
+			continue;
+
+#ifdef WIN32
+		if ( (rc < 0) && (__ba_errno__ == WSAEINTR) )
+#else
+		if ( (rc < 0) && (__ba_errno__ == EINTR) )
+#endif
+			{
+			$LOG(STS$K_WARN, "[#%d-#%d]poll()->%d, errno=%d", td, g_udp_sd, rc, __ba_errno__);
+			continue;
+			}
+
+
+
+		if ( pfd[0].revents & (~POLLIN) || pfd[1].revents & (~POLLIN) )	/* Unexpected events ?!			*/
+			return	$LOG(STS$K_ERROR, "[#%d] poll()->%d, UDP/TUN.revents=%08x/%08x, errno=%d",
+					td, g_udp_sd, rc, pfd[0].revents, pfd[1].revents, __ba_errno__);
+
+		/* Retrieve data from UDP socket -> send to TUN device	*/
+		slen = sizeof(struct sockaddr_in);
+		if ( (pfd[0].revents & POLLIN) && (0 < (rc = recvfrom(g_udp_sd, buf, sizeof(buf), 0, &rsock, &slen))) )
+			{
+			/* Check sender IP, ignore unrelated packets ... */
+			if ( g_client_sk.sin_addr.s_addr != rsock.sin_addr.s_addr )
+				continue;
+
+
+			/* Is it's control packet begined with the magic prefix  ? */
+			if ( pdu->magic64 == *magic64 )
+				{
+				$LOG(STS$K_INFO, "Got control packet, req=%d, %d octets", pdu->req, rc);
+
+				//control_process(pdu, rc);
+
+				/* Skip rest of processing */
+				continue;
+				}
+
+			$IFTRACE(g_trace, "UDP RD: %d octets", rc);
+
+			if ( rc != write(td, buf, rc) )
+				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on TUN device, write(%d octets), errno=%d", td, g_udp_sd, rc, __ba_errno__);
+
+			$IFTRACE(g_trace, "TUN WR: %d octets", rc);
+			}
+		else
+#ifdef WIN32
+		if ( (0 >= status) && (errno != WSAEINPROGRESS) )
+#else
+		if ( (0 >= rc) && (errno != EINPROGRESS) )
+#endif
+			{
+			$LOG(STS$K_ERROR, "[#%d-#%d]recv()->%d, UDP/TUN.revents=%08x/%08x, errno=%d",
+					td, g_udp_sd, rc, pfd[0].revents, pfd[1].revents, __ba_errno__);
+			break;
+			}
+
+
+		/* Retrieve data from TUN device -> send to UDP socket */
+		if ( (pfd[1].revents & POLLIN) && (rc = read (td, buf, sizeof(buf))) )
+			{
+			slen = sizeof(struct sockaddr_in);
+
+			$IFTRACE(g_trace, "TUN RD: %d octets", rc);
+
+			if ( rc != sendto(g_udp_sd, buf, rc, 0, &g_client_sk, slen) )
+				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on UDP socket, sendto(%d octets), errno=%d", td, g_udp_sd, rc, errno);
+
+			$IFTRACE(g_trace, "UDP WR: %d octets", rc);
+			}
+		else
+#ifdef WIN32
+		if ( (0 >= status) && (errno != WSAEINPROGRESS) )
+#else
+		if ( (0 >= rc) && (errno != EINPROGRESS) )
+#endif
+			$LOG(STS$K_ERROR, "[#%d-#%d]recv()->%d, UDP/TUN.revents=%08x/%08x, errno=%d",
+					td, g_udp_sd, rc, pfd[0].revents, pfd[1].revents, __ba_errno__);
 		}
 
 
@@ -957,7 +1046,7 @@ SHA1Context	sha = {0};
 	$IFTRACE(g_trace, "[%d]Got request code %#x, from %s:%d, %d octets", g_udp_sd, pdu->req, sfrom, ntohs(from.sin_port), buflen);
 
 	/* Check length and magic prefix of the packet, just drop unrelated packets */
-	if ( (buflen < SVPN$SZ_PDUHDR) && (memcmp(pdu->magic, SVPN$T_MAZIC,  SVPN$SZ_MAZIC)) )
+	if ( (buflen < SVPN$SZ_PDUHDR) && (memcmp(pdu->magic, SVPN$T_MAGIC,  SVPN$SZ_MAGIC)) )
 		return	$LOG(STS$K_ERROR, "[%d]Drop request code %#x, from %s:%d, %d octets", g_udp_sd, pdu->req, buflen);
 
 	if ( pdu->proto != SVPN$K_PROTO_V1  )
@@ -1006,7 +1095,7 @@ SHA1Context	sha = {0};
 		bufsz -= adjlen;
 		}
 
-	if ( !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_NET, SVPN$K_IP, &g_network, sizeof(struct in_addr), &adjlen))) )
+	if ( !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_NET, SVPN$K_IP, &g_ia_network, sizeof(struct in_addr), &adjlen))) )
 		return	$LOG(status, "[%d]Error put attribute", g_udp_sd);
 	buflen += adjlen;
 	bufsz -= adjlen;
@@ -1101,7 +1190,7 @@ SVPN_STAT	l_stat = {0};
 	/* Just for fun */
 	init_sig_handler ();
 
-#if	1
+#if	0
 	/* Create crew workers */
 	for ( int i = 0; i < g_threads; i++ )
 		{
@@ -1117,7 +1206,7 @@ SVPN_STAT	l_stat = {0};
 			{
 			if ( 1 & control () )
 				{
-				// g_state = SVPN$K_STATEON;
+				g_state = SVPN$K_STATEON;
 				}
 			}
 
@@ -1139,6 +1228,13 @@ SVPN_STAT	l_stat = {0};
 			g_state = SVPN$K_STATECTL;
 			}
 
+
+		if ( g_state == SVPN$K_STATETUN )
+			{
+			set_tun_state(1);	/* Down the tunX */
+			worker();
+			set_tun_state(0);	/* Down the tunX */
+			}
 
 		status = 3;
 

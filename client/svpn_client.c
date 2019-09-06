@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNCLNT"
-#define	__IDENT__	"X.00-00"
-#define	__REV__		"0.0.00"
+#define	__IDENT__	"X.00-01"
+#define	__REV__		"0.0.01"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -198,6 +198,8 @@ static const	ASC	__ident__ = {$ASCINI(__IDENT__ "/"  __ARCH__NAME__   "(built at
 
 /* Global configuration parameters */
 static	const	int slen = sizeof(struct sockaddr), one = 1, off = 0;
+static const char magic [SVPN$SZ_MAGIC] = {SVPN$T_MAGIC};
+static const unsigned long long *magic64 = (unsigned long long *) &magic;
 
 static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
 	g_state = SVPN$K_STATECTL,	/* Initial state for SVPN-Server	*/
@@ -355,6 +357,8 @@ static int	sd = -1;
 		if ( 0 > (sd = socket(AF_INET, SOCK_DGRAM, 0)) )
 			return	$LOG(STS$K_FATAL, "socket(), errno=%d", errno);
 		}
+
+	strncpy(ifr.ifr_name, $ASCPTR(&g_tun), IFNAMSIZ);
 
 	/* DOWN the TUN/TAP device */
 	if( ioctl(sd, SIOCGIFFLAGS, &ifr) )
@@ -822,8 +826,10 @@ va_list ap;
 
 
 /*
- *   DESCRIPTION: Performs accept and process request from remote client/peer according Phase I
- *	protocol
+ *   DESCRIPTION: Establihing control channel with the server according Phase I:
+ *	send LOGIN
+ *	process ACCEPT
+ *	accept parameters, setup TUN
  *
  *   IMPLICITE INPUT
  *
@@ -839,7 +845,7 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
 	/* Send LOGIN <user> request
 	 *	pdu->digest = sha(header, salt, payload);
 	 */
-	memcpy(pdu->magic, SVPN$T_MAZIC, SVPN$SZ_MAZIC);
+	memcpy(pdu->magic, SVPN$T_MAGIC, SVPN$SZ_MAGIC);
 	pdu->proto = SVPN$K_PROTO_V1;
 	pdu->req = SVPN$K_REQ_LOGIN;
 	buflen = SVPN$SZ_PDUHDR;
@@ -869,7 +875,7 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
 		return	$LOG(STS$K_WARN, "[#%d]No ACCEPT from %.*s in %d msec, cancel session setup", g_udp_sd, $ASC(&g_server), timespec2msec (&g_timers_set.t_io));
 
 	/* Check length and magic prefix of the packet, just drop unrelated packets */
-	if ( (buflen < SVPN$SZ_PDUHDR) && (memcmp(pdu->magic, SVPN$T_MAZIC,  SVPN$SZ_MAZIC)) )
+	if ( (buflen < SVPN$SZ_PDUHDR) && (memcmp(pdu->magic, SVPN$T_MAGIC,  SVPN$SZ_MAGIC)) )
 		return	$LOG(STS$K_ERROR, "[#%d]Drop request code %#x, from %.*s, length=%d octets", g_udp_sd, pdu->req, $ASC(&g_server), buflen);
 
 	if ( pdu->proto != SVPN$K_PROTO_V1  )
@@ -919,13 +925,12 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
 	if ( !(1 & (tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_ENC, &v_type, &g_enc, &len))) )
 		$LOG(STS$K_WARN, "[%d]No attribute %#x", g_udp_sd, SVPN$K_TAG_ENC);
 
-	/*
-	 * At the point we have got options from the server, so we should applicate it
-	 * for the local SVPN client.
-	 */
-
-
-
+	/* Display session parameters ... */
+	$LOG(STS$K_INFO, "Session parameters :");
+	$LOG(STS$K_INFO, "\tNetwork    :%s", inet_ntop(AF_INET, &g_ia_network, buf, sizeof(buf)));
+	$LOG(STS$K_INFO, "\tNetmask    :%s", inet_ntop(AF_INET, &g_ia_netmask, buf, sizeof(buf)));
+	$LOG(STS$K_INFO, "\tTUN/IP     :%s", inet_ntop(AF_INET, &g_ia_cliaddr, buf, sizeof(buf)));
+	$LOG(STS$K_INFO, "\tEncryption :%d", g_enc);
 
 	return	$LOG(STS$K_SUCCESS, "Session is establied");
 }
@@ -944,6 +949,7 @@ struct	sockaddr_in rsock = {0};
 char	buf [SVPN$SZ_IOBUF];
 SVPN_PDU *pdu = (SVPN_PDU *) buf;
 int	slen = sizeof(struct sockaddr_in);
+
 
 	$LOG(STS$K_INFO, "Starting ...");
 
@@ -995,10 +1001,24 @@ int	slen = sizeof(struct sockaddr_in);
 			if ( g_server_sk.sin_addr.s_addr != rsock.sin_addr.s_addr )
 				continue;
 
-			$DUMPHEX(buf, rc);
+			/* Is it's control packet begined with the magic prefix  ? */
+			if ( pdu->magic64 == *magic64 )
+				{
+				$LOG(STS$K_INFO, "Got control packet, req=%d, %d octets", pdu->req, rc);
+
+				//control_process(pdu, rc);
+
+				/* Skip rest of processing */
+				continue;
+				}
+
+			$IFTRACE(g_trace, "UDP RD: %d octets", rc);
+
 
 			if ( rc != write(g_tun_sd, buf, rc) )
 				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on TUN device, write(%d octets), errno=%d", g_tun_sd, g_udp_sd, rc, __ba_errno__);
+
+			$IFTRACE(g_trace, "TUN WR: %d octets", rc);
 			}
 		else
 #ifdef WIN32
@@ -1018,10 +1038,13 @@ int	slen = sizeof(struct sockaddr_in);
 			{
 			slen = sizeof(struct sockaddr_in);
 
-			$DUMPHEX(buf, rc);
+
+			$IFTRACE(g_trace, "TUN RD: %d octets", rc);
 
 			if ( rc != sendto(g_udp_sd, buf, rc, 0, &g_server_sk, slen) )
 				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on UDP socket, sendto(%d octets), errno=%d", g_tun_sd, g_udp_sd, rc, errno);
+
+			$IFTRACE(g_trace, "UDP WR: %d octets", rc);
 			}
 		else
 #ifdef WIN32

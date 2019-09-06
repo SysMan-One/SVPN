@@ -101,14 +101,18 @@ enum	{			/* Signaling channel requests */
 #pragma	pack	(push, 1)
 
 
-#define	SVPN$SZ_MAZIC	8
-#define	SVPN$T_MAZIC	"StarLet"
+#define	SVPN$SZ_MAGIC	8
+#define	SVPN$T_MAGIC	"StarLet"
 #define	SVPN$SZ_DIGEST	20	/* SHA1 size	*/
 
 typedef struct	__svpn_pdu
 	{
-	unsigned char	magic[SVPN$SZ_MAZIC],
-			proto,		/* Protocol version	*/
+	union {
+	unsigned char	magic[SVPN$SZ_MAGIC];
+	unsigned long long magic64;
+	};
+
+	unsigned char	proto,		/* Protocol version	*/
 			req,		/* Request type		*/
 			digest[SVPN$SZ_DIGEST];	/* SHA1		*/
 
