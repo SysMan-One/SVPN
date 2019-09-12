@@ -145,34 +145,177 @@ enum	{
 	SVPN$K_IP			/* IP4 or IP6 address		*/
 };
 
+
+/*	Value type is 3 bits
+ *	Tag Id is 5 bits
+ */
+#define	TAG$M_TYPE	0xE0
+#define	TAG$M_ID	(~(TAG$M_TYPE))
+
+
 int	tlv_get (void *buf, int bufsz, unsigned v_tag, unsigned *v_type, void *val, unsigned *valsz);
 int	tlv_put (void *buf, unsigned bufsz, unsigned v_tag, unsigned v_type, void *val, unsigned valsz, unsigned *adjlen);
-void	tlv_dump (void *buf, unsigned bufsz);
 
-static	inline	void	rand_octets(
-		void	*buf,
-		int	 bufsz
-			)
+
+
+/**
+ * @brief avproto_encode_tag - encapsulate given 'v_type' and  'v_tag' into the 16-bits field.
+ *	return NBO representation of the w_tag;
+ *
+ * @param v_type	- Tag type, see TAG$K_* constatnts
+ * @param v_tag		- Tasg Id, application specific Tag Id
+ *
+ * @return	- 16 bits TLV.w_tag field, NBO
+ */
+inline	static unsigned char tlv_encode_tag
+		(
+	unsigned char	v_type,
+	unsigned char	v_tag
+		)
 {
-int	i, r, *ip;
+	return	( (v_type << 5) | v_tag );
+}
 
-	srand((unsigned) time(NULL)) ;
+/**
+ * @brief avproto_decode_tag - extract 'tag id' and 'tag type' field from the TLV.w_tag.
+ *	Return w_gat in the Host Order Byte
+ *
+ * @param w_tag		- TLV.w_tag field, NBO
+ * @param v_type	- an address of variable to accept unpacked 'tag type' field
+ * @param v_tag		- an address of variable to accept unpacked 'tag id field
+ *
+ * @return	- 16 bits, TLV_w_tag in Host Order Byte
+ */
+inline static unsigned char	tlv_decode_tag
+		(
+	unsigned char	tag,
+	unsigned char	*v_type,
+	unsigned char	*v_tag
+		)
+{
 
-	for(i =  135 + (time(NULL)%135); i--; )
-		rand();
+	*v_type = tag >> 5;
+	*v_tag = tag & TAG$M_ID;
 
-	for (i = bufsz/(sizeof (int)), ip = (int *)buf; i--; ip++ )
-		*ip = rand();
+	return	tag;
+}
 
-	if ( i = (bufsz % (sizeof(int))) )
+#pragma	pack	(pop)
+
+/*
+ *   DESCRIPTION: Encrypting given buffer by XOR-ing with the specified key, it's simples kind of obfuscation.
+ *
+ *   INPUT:
+ *	src:	A buffer with the data to be processed on the place
+ *	srclen:	A length of the data in the buffer
+ *	key:	A key octets string
+ *	keysz:	Key length
+ *
+ *   OUTPUT:
+ *	src:	Has been XOR-ed data
+ *
+ *   RETURNS:
+ *	NONE
+ */
+static inline	int	qbox_xor	(
+				void	*buf,
+				int	 buflen,
+				void	*key,
+				int	 keysz
+					)
+{
+int	i, j, *isrc = (int *) buf, *ikey;
+char	*csrc , *ckey;
+
+	keysz	= keysz/sizeof(int);
+
+	assert(keysz);
+
+
+
+	/* Step by 4 octets ... */
+	for ( i = buflen / sizeof(int), j = 0, ikey = (int *) key; i--; )
 		{
-		r = rand();
-		memcpy(ip, &r, i);
+		/* XOR-ing 32-bits data with 32-bits of key */
+		(*isrc) = (*isrc) ^ (*ikey);
+
+		isrc++;
+		ikey = (int *) key + j % keysz;
 		}
+
+
+
+	/* Rest of buffer */
+	csrc = (char *) isrc;
+
+	for ( i = buflen % sizeof(int), ckey = key; i; i--)
+		{
+		/* XOR-ing 8-bits data with 8-bits of key */
+		(*csrc) = (*csrc) ^ (*ckey);
+
+		csrc++;
+		ckey++;
+		}
+
+	return	STS$K_SUCCESS;
 }
 
 
-#pragma	pack	(pop)
+
+static inline 	decode	(
+		int	algo,
+		void	*buf,
+		int	buflen,
+		void	*key,
+		int	keysz
+		)
+{
+	switch (algo)
+		{
+		case	SVPN$K_ENC_NONE:	/* No encryption */
+			return	STS$K_SUCCESS;
+
+		case	SVPN$K_ENC_XOR:		/* Simple XOR-ing	*/
+			return	qbox_xor (buf, buflen, key, keysz);
+
+		case	SVPN$K_ENC_IDEA:
+		case	SVPN$K_ENC_TWOFISH:
+
+		default:
+			return	STS$K_WARN;
+		}
+
+	return	STS$K_ERROR;
+}
+
+
+
+
+static inline 	encode	(
+		int	algo,
+		void	*buf,
+		int	buflen,
+		void	*key,
+		int	keysz
+		)
+{
+	switch (algo)
+		{
+		case	SVPN$K_ENC_NONE:	/* No encryption */
+			return	STS$K_SUCCESS;
+
+		case	SVPN$K_ENC_XOR:		/* Simple XOR-ing	*/
+			return	qbox_xor (buf, buflen, key, keysz);
+
+		case	SVPN$K_ENC_IDEA:
+		case	SVPN$K_ENC_TWOFISH:
+
+		default:
+			return	STS$K_WARN;
+		}
+
+	return	STS$K_ERROR;
+}
 
 
 #ifdef __cplusplus

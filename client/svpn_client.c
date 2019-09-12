@@ -210,7 +210,8 @@ static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
 	g_tun_sd = -1,
 	g_tun_sdctl = -1,
 	g_mss = 0,			/* MTU for datagram			*/
-	g_mtu = 0;			/* MSS for TCP/SYN			*/
+	g_mtu = 0,			/* MSS for TCP/SYN			*/
+	g_input_count = 0;		/* Should be increment by receiving from UDP */
 
 
 static const struct timespec g_locktmo = {5, 0};/* A timeout for thread's wait lock	*/
@@ -222,6 +223,7 @@ ASC	g_tun = {$ASCINI("tun33")},	/* OS specific TUN device name		*/
 	g_server = {0}, g_cliname = {0}, g_climsg = {0};
 
 char	g_salt[SVPN$SZ_SALT];
+char	g_key[SVPN$SZ_DIGEST];
 
 struct in_addr g_ia_network = {0}, g_ia_cliaddr = {0}, g_ia_netmask = {0};
 
@@ -863,11 +865,6 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
 
 	$IFTRACE(g_trace, "[#%d]Sent LOGIN to %.*s, %d octets", g_udp_sd, $ASC(&g_server), buflen);
 
-
-
-
-
-
 	/* Wait for ACCEPT ... */
 	$IFTRACE(g_trace, "[#%d]Wait for ACCEPT from %.*s (timeout is %d msec) ...", g_udp_sd, $ASC(&g_server), timespec2msec (&g_timers_set.t_io));
 
@@ -936,6 +933,51 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
 }
 
 
+
+
+
+/*
+ *   DESCRIPTION: process has been received PING request.
+ *
+ *   INPUT:
+ *	sd:	UDP socket descriptor
+ *	to:	A remote client socket
+ *	bufp:	A buffer with the PING's PDU
+ *	buflen:	A size of the PDU
+ *
+ *   IMPLICITE OUTPUT
+ */
+static int	process_pong	(
+				int	 sd,
+		struct	sockaddr_in	*to,
+				void	*buf,
+				int	 buflen
+				)
+{
+int	status, len = 0, v_type = 0, seq = 0;
+SVPN_PDU *pdu = (SVPN_PDU *) buf;
+
+	/*
+	 * Extract SEQUENCE attribute
+	 */
+	len = sizeof(seq);
+	if ( !(1 & (tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_SEQ, &v_type, &seq, &len))) )
+		$LOG(STS$K_WARN, "[%d]No attribute %#x", g_udp_sd, SVPN$K_TAG_SEQ);
+
+	/* Do nothign with request - just sent it back as PONG request ... */
+	pdu->req = SVPN$K_REQ_PONG;
+
+	if ( !(1 & xmit_pkt (sd, buf, buflen, to)) )
+		return	$LOG(STS$K_ERROR, "[#%d]Error send PING #%#x", sd, seq);
+
+	$IFTRACE(g_trace, "[#%d]Sent PING #%#x", sd, seq);
+
+	return	STS$K_SUCCESS;
+}
+
+
+
+
 static int	worker	(void)
 {
 int	rc = 0, idle_count;
@@ -950,7 +992,6 @@ char	buf [SVPN$SZ_IOBUF];
 SVPN_PDU *pdu = (SVPN_PDU *) buf;
 int	slen = sizeof(struct sockaddr_in);
 
-
 	$LOG(STS$K_INFO, "Starting ...");
 
 	/* We suppose to be use poll() on the TUN and UDP channels to performs
@@ -960,8 +1001,28 @@ int	slen = sizeof(struct sockaddr_in);
 
 	$LOG(STS$K_INFO, "[#%d-#%d]Main loop ...", g_tun_sd, g_udp_sd);
 
-	for  ( idle_count = 0; !g_exit_flag; )
+	for  ( idle_count = 0, g_input_count = 1; !g_exit_flag; )
 		{
+		/* Check activity ... */
+		if ( !g_input_count )
+			{
+			if ( (++idle_count) > 3 )
+				{
+				$LOG(STS$K_ERROR, "Zero activity has been detected, close data channel");
+				//g_state = SVPN$K_STATEOFF;
+				//break;
+				}
+			else	$LOG(STS$K_WARN, "No inputs from remote SVPN server, idle count is %d", idle_count);
+			}
+		else	{
+			if ( idle_count )
+				$IFTRACE(g_trace, "Inputs counter is %d, idle count is %d", g_input_count, idle_count);
+
+			g_input_count = idle_count = 0;
+			}
+
+
+
 		/* Wait Input events from TUN or UDP device ... */
 #ifdef WIN32
 		if( 0 >  (rc = WSAPoll(&pfd, 2, timespec2msec (delta))) && (__ba_errno__ != WSAEINTR) )
@@ -972,10 +1033,8 @@ int	slen = sizeof(struct sockaddr_in);
 
 
 		if ( !rc )	/* Nothing to do */
-			{
-			idle_count++;
 			continue;
-			}
+
 
 #ifdef WIN32
 		if ( (rc < 0) && (__ba_errno__ == WSAEINTR) )
@@ -1001,12 +1060,14 @@ int	slen = sizeof(struct sockaddr_in);
 			if ( g_server_sk.sin_addr.s_addr != rsock.sin_addr.s_addr )
 				continue;
 
+			g_input_count++;
+
 			/* Is it's control packet begined with the magic prefix  ? */
 			if ( pdu->magic64 == *magic64 )
 				{
 				$LOG(STS$K_INFO, "Got control packet, req=%d, %d octets", pdu->req, rc);
 
-				//control_process(pdu, rc);
+				process_pong (g_udp_sd, &g_server_sk, pdu, rc);
 
 				/* Skip rest of processing */
 				continue;
@@ -1014,6 +1075,9 @@ int	slen = sizeof(struct sockaddr_in);
 
 			$IFTRACE(g_trace, "UDP RD: %d octets", rc);
 
+
+			if ( g_enc != SVPN$K_ENC_NONE )
+				decode(g_enc, buf, rc, g_key, sizeof(g_key));
 
 			if ( rc != write(g_tun_sd, buf, rc) )
 				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on TUN device, write(%d octets), errno=%d", g_tun_sd, g_udp_sd, rc, __ba_errno__);
@@ -1041,8 +1105,12 @@ int	slen = sizeof(struct sockaddr_in);
 
 			$IFTRACE(g_trace, "TUN RD: %d octets", rc);
 
+			if ( g_enc != SVPN$K_ENC_NONE )
+				encode(g_enc, buf, rc, g_key, sizeof(g_key));
+
 			if ( rc != sendto(g_udp_sd, buf, rc, 0, &g_server_sk, slen) )
 				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on UDP socket, sendto(%d octets), errno=%d", g_tun_sd, g_udp_sd, rc, errno);
+
 
 			$IFTRACE(g_trace, "UDP WR: %d octets", rc);
 			}
@@ -1059,6 +1127,9 @@ int	slen = sizeof(struct sockaddr_in);
 
 	return	$LOG(STS$K_INFO, "Terminated");
 }
+
+
+
 
 
 /*
@@ -1110,12 +1181,8 @@ pthread_t	tid;
 	/* Just for fun */
 	init_sig_handler ();
 
-#if 0
-	/* Create crew workers */
-	for ( int i = 0; i < g_threads; i++ )
-		if ( status = pthread_create(&tid, NULL, worker, NULL) )
-			return	$LOG(STS$K_FATAL, "Cannot start worker thread, pthread_create()->%d, errno=%d", status, errno);
-#endif
+	/* Generate session key ... */
+	hmac_gen(g_key, sizeof(g_key), $ASCPTR(&g_auth), $ASCLEN(&g_auth), NULL);
 
 	/**/
 	while ( !g_exit_flag )

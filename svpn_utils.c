@@ -60,7 +60,7 @@ SVPN_TLV *ptlv = (SVPN_TLV *) buf;
 	if ( bufsz < (*adjlen = (sizeof(SVPN_TLV) + valsz)) )
 		return	$LOG(STS$K_ERROR, "No free space for tag=%d, type=%d, len=%d", v_tag, v_type, valsz);
 
-	ptlv->tag = (unsigned char ) v_tag;
+	ptlv->tag = (unsigned char ) tlv_encode_tag (v_type, v_tag);
 	ptlv->len = (unsigned char ) valsz;
 
 	switch ( v_type )
@@ -146,7 +146,8 @@ unsigned l_len = 0, l_tag = 0, l_type = 0;
 	for ( status = STS$K_WARN; pos < bufsz; )
 		{
 		l_len = ptlv->len;
-		l_tag = ptlv->tag;
+
+		tlv_decode_tag (ptlv->tag, &l_type, &l_tag);
 
 		/* Adjust context */
 		pos += sizeof(SVPN_TLV) + l_len;

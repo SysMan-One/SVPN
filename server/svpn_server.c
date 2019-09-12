@@ -230,6 +230,8 @@ struct in_addr g_ia_network = {0}, g_ia_local = {0}, g_ia_cliaddr = {0} , g_netm
 
 struct sockaddr_in g_server_sk = {.sin_family = AF_INET}, g_client_sk = {.sin_family = AF_INET};
 
+char	g_key[SVPN$SZ_DIGEST];
+
 					/* Structure to keep timers information */
 typedef	struct __svpn_timers__	{
 
@@ -851,6 +853,39 @@ int	i;
 
 
 
+/*
+ *   DESCRIPTION: process has been received PONG request.
+ *
+ *   INPUT:
+ *
+ *	bufp:	A buffer with the PONG's PDU
+ *	buflen:	A size of the PDU
+ *
+ *   IMPLICITE OUTPUT
+ */
+static int	process_pong	(
+				void	*buf,
+				int	 buflen
+				)
+{
+int	status, len = 0, v_type = 0, seq = 0;
+SVPN_PDU *pdu = (SVPN_PDU *) buf;
+struct	timespec  now ={0};
+	/*
+	 * Extract SEQUENCE attribute
+	 */
+	len = sizeof(seq);
+	if ( !(1 & (tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_SEQ, &v_type, &seq, &len))) )
+		$LOG(STS$K_WARN, "No attribute %#x", g_udp_sd, SVPN$K_TAG_SEQ);
+
+	len = sizeof(now);
+	if ( !(1 & (tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_TIME, &v_type, &now, &len))) )
+		$LOG(STS$K_WARN, "No attribute %#x", g_udp_sd, SVPN$K_TAG_TIME);
+
+	return	STS$K_SUCCESS;
+}
+
+
 
 /*
  *   DESCRIPTION: Main I/O processing routine, waiting for establishing signaling/data channel , start then
@@ -949,8 +984,6 @@ struct	timespec now = {0}, etime = {0}, delta = {13, 0};
 			if ( g_client_sk.sin_addr.s_addr != rsock.sin_addr.s_addr )
 				continue;
 
-			atomic_fetch_add(&g_input_count, 1);	/* Increment inputs count !*/
-
 			atomic_fetch_add(&g_stat.bnetrd, rc);
 			atomic_fetch_add(&g_stat.pnetrd, 1);
 
@@ -959,12 +992,32 @@ struct	timespec now = {0}, etime = {0}, delta = {13, 0};
 				{
 				$LOG(STS$K_INFO, "Got control packet, req=%d, %d octets", pdu->req, rc);
 
-				//control_process(pdu, rc);
+				switch (pdu->req)
+					{
+					case	SVPN$K_REQ_PONG:
+						process_pong(buf, rc);
+						atomic_fetch_add(&g_input_count, 1);	/* Increment inputs count !*/
+						break;
+
+					case	SVPN$K_REQ_LOGOUT:
+						$LOG(STS$K_INFO, "Close tunnel on LOGOUT request");
+						    g_state = SVPN$K_STATEOFF;
+						   break;
+
+					default:
+						g_state = SVPN$K_STATEOFF;
+						$LOG(STS$K_ERROR, "Close tunnel on control sequence");
+					}
 
 				/* Skip rest of processing */
 				continue;
 				}
 
+
+			atomic_fetch_add(&g_input_count, 1);	/* Increment inputs count !*/
+
+			if ( g_enc != SVPN$K_ENC_NONE )
+				decode(g_enc, buf, rc, g_key, sizeof(g_key));
 
 			if ( rc != write(td, buf, rc) )
 				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on TUN device, write(%d octets), errno=%d", td, g_udp_sd, rc, __ba_errno__);
@@ -993,6 +1046,9 @@ struct	timespec now = {0}, etime = {0}, delta = {13, 0};
 			atomic_fetch_add(&g_stat.btunrd, rc);
 			atomic_fetch_add(&g_stat.ptunrd, 1);
 
+
+			if ( g_enc != SVPN$K_ENC_NONE )
+				encode(g_enc, buf, rc, g_key, sizeof(g_key));
 
 			if ( rc != sendto(g_udp_sd, buf, rc, 0, &g_client_sk, slen) )
 				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on UDP socket, sendto(%d octets), errno=%d", td, g_udp_sd, rc, errno);
@@ -1105,6 +1161,7 @@ SHA1Context	sha = {0};
 
 	inet_ntop(AF_INET, &from.sin_addr, sfrom, sizeof(sfrom));
 	$IFTRACE(g_trace, "[#%d]Got request code %#x, from %s:%d, %d octets", g_udp_sd, pdu->req, sfrom, ntohs(from.sin_port), buflen);
+
 
 	/* Check length and magic prefix of the packet, just drop unrelated packets */
 	if ( (buflen < SVPN$SZ_PDUHDR) && (memcmp(pdu->magic, SVPN$T_MAGIC,  SVPN$SZ_MAGIC)) )
@@ -1223,7 +1280,7 @@ struct timespec now;
 	g_seq++;
 
 	/* Prepare PING request ... */
-	pdu->magic64 = magic64;
+	pdu->magic64 = *magic64;
 	pdu->req = SVPN$K_REQ_PING;
 	pdu->proto = SVPN$K_PROTO_V1;
 
@@ -1249,12 +1306,13 @@ struct timespec now;
 	tlv_dump(pdu->data, buflen - SVPN$SZ_PDUHDR);
 
 	if ( !(1 & xmit_pkt (g_udp_sd, buf, buflen, to)) )
-		return	$LOG(STS$K_ERROR, "[#%d]Error send PING", g_udp_sd);
+		return	$LOG(STS$K_ERROR, "[#%d]Error send PING #%#x", g_udp_sd, g_seq);
 
-	$IFTRACE(g_trace, "[#%d]Sent PING #%d", g_udp_sd, g_seq);
+	$IFTRACE(g_trace, "[#%d]Sent PING #%#x", g_udp_sd, g_seq);
 
 	return	STS$K_SUCCESS;
 }
+
 
 
 
@@ -1275,6 +1333,7 @@ pthread_t	tid;
 SVPN_STAT	l_stat = {0};
 
 	$LOG(STS$K_INFO, "Rev: " __IDENT__ "/"  __ARCH__NAME__   ", (built  at "__DATE__ " " __TIME__ " with CC " __VERSION__ ")");
+
 
 	/*
 	 * Process command line arguments
@@ -1309,6 +1368,8 @@ SVPN_STAT	l_stat = {0};
 	/* Just for fun */
 	init_sig_handler ();
 
+	/* Generate session key ... */
+	hmac_gen(g_key, sizeof(g_key), $ASCPTR(&g_auth), $ASCLEN(&g_auth), NULL);
 
 	/* Create crew workers */
 	for ( int i = 0; i < g_threads; i++ )
@@ -1369,7 +1430,7 @@ SVPN_STAT	l_stat = {0};
 				if ( (++idle_count) > 3 )
 					{
 					$LOG(STS$K_ERROR, "Zero activity has been detected, close data channel");
-					//g_state = SVPN$K_STATEOFF;
+					g_state = SVPN$K_STATEOFF;
 					}
 				else	{
 					$LOG(STS$K_WARN, "No inputs from remote SVPN client, idle count is %d", idle_count);
@@ -1378,6 +1439,7 @@ SVPN_STAT	l_stat = {0};
 				}
 			else	{
 				$IFTRACE(g_trace, "Inputs counter is %d", g_input_count);
+				idle_count = 0;
 				}
 
 			atomic_store(&g_input_count, 0); /* Reset inputs counter */
@@ -1385,7 +1447,7 @@ SVPN_STAT	l_stat = {0};
 
 
 		/* Just hibernate for some interval to reduce consuming CPU ... */
-		status = g_timers_set.t_idle.tv_sec;
+		status = 5;
 
 		#ifdef WIN32
 			Sleep(status * 1000);
