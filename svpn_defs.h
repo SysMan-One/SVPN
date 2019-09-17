@@ -262,7 +262,7 @@ char	*csrc , *ckey;
 
 
 
-static inline 	decode	(
+static inline 	int	decode	(
 		int	algo,
 		void	*buf,
 		int	buflen,
@@ -291,7 +291,7 @@ static inline 	decode	(
 
 
 
-static inline 	encode	(
+static inline 	int	encode	(
 		int	algo,
 		void	*buf,
 		int	buflen,

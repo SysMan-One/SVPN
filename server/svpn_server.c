@@ -893,12 +893,11 @@ struct	timespec  now ={0};
  */
 static int	worker	(void)
 {
-int	rc, td = -1;
+int	rc, td = -1, slen = sizeof(struct sockaddr_in);
 struct pollfd pfd[] = {{g_udp_sd, POLLIN, 0 }, {0, POLLIN, 0}};
 struct	sockaddr_in rsock = {0};
 char	buf [SVPN$SZ_IOBUF];
 SVPN_PDU *pdu = (SVPN_PDU *) buf;
-int	slen = sizeof(struct sockaddr_in);
 struct	timespec now = {0}, etime = {0}, delta = {13, 0};
 
 	$LOG(STS$K_INFO, "Starting ...");
@@ -952,7 +951,7 @@ struct	timespec now = {0}, etime = {0}, delta = {13, 0};
 #ifdef WIN32
 		if( 0 >  (rc = WSAPoll(&pfd, 2, timespec2msec (delta))) && (__ba_errno__ != WSAEINTR) )
 #else
-		if( 0 >  (rc = poll(&pfd, 2, timespec2msec (&g_timers_set.t_io))) && (__ba_errno__ != EINTR) )
+		if( 0 >  (rc = poll(pfd, 2, timespec2msec (&g_timers_set.t_io))) && (__ba_errno__ != EINTR) )
 #endif // WIN32
 			return	$LOG(STS$K_ERROR, "[#%d-#%d]poll()->%d, errno=%d", td, g_udp_sd, rc, __ba_errno__);
 
@@ -1018,6 +1017,8 @@ struct	timespec now = {0}, etime = {0}, delta = {13, 0};
 
 			if ( g_enc != SVPN$K_ENC_NONE )
 				decode(g_enc, buf, rc, g_key, sizeof(g_key));
+
+			$DUMPHEX(buf, rc);
 
 			if ( rc != write(td, buf, rc) )
 				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on TUN device, write(%d octets), errno=%d", td, g_udp_sd, rc, __ba_errno__);
@@ -1213,23 +1214,31 @@ SHA1Context	sha = {0};
 		bufsz -= adjlen;
 		}
 
-	if ( !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_NET, SVPN$K_IP, &g_ia_network, sizeof(struct in_addr), &adjlen))) )
-		return	$LOG(status, "[#%d]Error put attribute", g_udp_sd);
+	tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_NET, SVPN$K_IP, &g_ia_network, sizeof(struct in_addr), &adjlen);
 	buflen += adjlen;
 	bufsz -= adjlen;
 
-	if ( !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_NETMASK, SVPN$K_IP, &g_netmask, sizeof(struct in_addr), &adjlen))) )
-		return	$LOG(status, "[#%d]Error put attribute", g_udp_sd);
+	tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_NETMASK, SVPN$K_IP, &g_netmask, sizeof(struct in_addr), &adjlen);
 	buflen += adjlen;
 	bufsz -= adjlen;
 
-	if ( !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_CLIADDR, SVPN$K_IP, &g_ia_cliaddr, sizeof(struct in_addr), &adjlen))) )
-		return	$LOG(status, "[#%d]Error put attribute", g_udp_sd);
+	tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_CLIADDR, SVPN$K_IP, &g_ia_cliaddr, sizeof(struct in_addr), &adjlen);
 	buflen += adjlen;
 	bufsz -= adjlen;
 
-	if ( !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_ENC, SVPN$K_LONG, &g_enc, sizeof(g_enc), &adjlen))) )
-		return	$LOG(status, "[#%d]Error put attribute", g_udp_sd);
+	tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_ENC, SVPN$K_LONG, &g_enc, sizeof(g_enc), &adjlen);
+	buflen += adjlen;
+	bufsz -= adjlen;
+
+	tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_KEEPALIVE, SVPN$K_LONG, &g_timers_set.t_ping, sizeof(int), &adjlen);
+	buflen += adjlen;
+	bufsz -= adjlen;
+
+	tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_IDLE, SVPN$K_LONG, &g_timers_set.t_idle, sizeof(int), &adjlen);
+	buflen += adjlen;
+	bufsz -= adjlen;
+
+	tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_TOTAL, SVPN$K_LONG, &g_timers_set.t_max, sizeof(int), &adjlen);
 	buflen += adjlen;
 	bufsz -= adjlen;
 
@@ -1387,11 +1396,11 @@ SVPN_STAT	l_stat = {0};
 			if ( 1 & control () )
 				{
 				g_state = SVPN$K_STATEON;
+				$LOG(STS$K_INFO, "State is ON");
 
 				set_tun_state(1);	/* UP the tunX */
 				}
-
-			continue;
+			else	continue;
 			}
 
 
@@ -1399,14 +1408,17 @@ SVPN_STAT	l_stat = {0};
 							 * to performs works on data tunneling
 							 */
 			{
+			idle_count = 0;
+
 			exec_script(&g_linkup);
+
+			g_state = SVPN$K_STATETUN;
+			$LOG(STS$K_INFO, "State is TUNNELING");
 
 			/* Send signal to the workers ... */
 			pthread_mutex_unlock (&crew_mtx);
 			status = pthread_cond_broadcast (&crea_cond);
 			pthread_mutex_unlock (&crew_mtx);
-
-			g_state = SVPN$K_STATETUN;
 			}
 
 
@@ -1419,6 +1431,9 @@ SVPN_STAT	l_stat = {0};
 			exec_script(&g_linkdown);
 
 			g_state = SVPN$K_STATECTL;
+			$LOG(STS$K_INFO, "State is CONTROL");
+
+			continue;
 			}
 
 
@@ -1431,9 +1446,10 @@ SVPN_STAT	l_stat = {0};
 					{
 					$LOG(STS$K_ERROR, "Zero activity has been detected, close data channel");
 					g_state = SVPN$K_STATEOFF;
+					continue;
 					}
 				else	{
-					$LOG(STS$K_WARN, "No inputs from remote SVPN client, idle count is %d", idle_count);
+					$IFTRACE(g_trace, "No inputs from remote SVPN client, idle count is %d", idle_count);
 					process_ping(g_udp_sd, &g_client_sk);
 					}
 				}
