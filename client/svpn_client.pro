@@ -16,7 +16,7 @@ HEADERS += \
 
 INCLUDEPATH	+= ..\
 
-LIBS	+= -pthread -lrt
+LIBS	+= -static -pthread -lrt
 
 
 if (linux-aarch64-g++):{

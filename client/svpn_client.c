@@ -208,7 +208,7 @@ static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
 	g_state = SVPN$K_STATECTL,	/* Initial state for SVPN-Server	*/
 	g_trace = 1,			/* A flag to produce extensible logging	*/
 	g_enc = SVPN$K_ENC_NONE,	/* Encryption mode, default is none	*/
-	g_threads = 3,			/* A size of the worker crew threads	*/
+	g_threads = 1,			/* A size of the worker crew threads	*/
 	g_udp_sd = -1,
 	g_tun_fd = -1,
 	g_tun_sdctl = -1,
@@ -402,7 +402,7 @@ struct sockaddr_in inaddr = {0};
 	*        IFF_NO_PI - Do not provide packet information
 	*        IFF_MULTI_QUEUE - Create a queue of multiqueue device
 	*/
-	ifr.ifr_flags = IFF_TAP | IFF_NO_PI | IFF_MULTI_QUEUE;
+	ifr.ifr_flags = IFF_TAP | IFF_NO_PI; // | IFF_MULTI_QUEUE;
 	strncpy(ifr.ifr_name, $ASCPTR(&g_tun), IFNAMSIZ);
 
 	/* Allocate new /devtunX ... */
@@ -463,7 +463,7 @@ int	err;
 	*        IFF_NO_PI - Do not provide packet information
 	*        IFF_MULTI_QUEUE - Create a queue of multiqueue device
 	*/
-	ifr.ifr_flags = IFF_TAP | IFF_NO_PI | IFF_MULTI_QUEUE;
+	ifr.ifr_flags = IFF_TAP | IFF_NO_PI; // | IFF_MULTI_QUEUE;
 	strncpy(ifr.ifr_name, $ASCPTR(&g_tun), IFNAMSIZ);
 
 	if ( 0 > (*fd = open("/dev/net/tun", O_RDWR)) )
