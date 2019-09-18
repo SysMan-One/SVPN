@@ -234,18 +234,20 @@ struct in_addr g_ia_network = {0}, g_ia_cliaddr = {0}, g_ia_netmask = {0};
 struct sockaddr_in g_server_sk = {.sin_family = AF_INET};
 
 					/* Structure to keep timers information */
+/* Structure to keep timers information */
 typedef	struct __svpn_timers__	{
 
-	struct timespec	t_io,		/* General network I/O timeout	*/
-			t_idle,		/* Close tunnel on non-activity	*/
-			t_ping,		/* Send "ping" every <t_ping> seconds,	*/
-					/* ... wait "pong" from client for <t_ping> seconds	*/
+struct timespec	t_io,		/* General network I/O timeout	*/
+		t_idle,		/* Close tunnel on non-activity	*/
+		t_ping,		/* Send "ping" every <t_ping> seconds,	*/
+				/* ... wait "pong" from client for <t_ping> seconds	*/
 
-			t_max;		/* Seconds, total limit of time for established tunnel */
+		t_max;		/* Seconds, total limit of time for established tunnel */
+		int	retry;
 
 } SVPN_TIMERS;
 
-static	SVPN_TIMERS	g_timers_set = { {7, 0}, {300, 0}, {13, 0}, {-1, 0}};
+static	SVPN_TIMERS	g_timers_set = { {3, 0}, {120, 0}, {3, 0}, {600, 0}, 3};
 
 static	pthread_mutex_t crew_mtx = PTHREAD_MUTEX_INITIALIZER;
 static	pthread_cond_t	crea_cond = PTHREAD_COND_INITIALIZER;
@@ -949,13 +951,16 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
 		$LOG(STS$K_WARN, "[%d]No attribute %#x", g_udp_sd, SVPN$K_TAG_ENC);
 
 	len = sizeof(int);
-	tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_KEEPALIVE, &v_type, &g_timers_set.t_ping, &len);
+	tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_PING, &v_type, &g_timers_set.t_ping.tv_sec, &len);
 
 	len = sizeof(int);
-	tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_IDLE, &v_type, &g_timers_set.t_idle, &len);
+	tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_RETRY, &v_type, &g_timers_set.retry, &len);
 
 	len = sizeof(int);
-	tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_TOTAL, &v_type, &g_timers_set.t_max, &len);
+	tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_IDLE, &v_type, &g_timers_set.t_idle.tv_sec, &len);
+
+	len = sizeof(int);
+	tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_TOTAL, &v_type, &g_timers_set.t_max.tv_sec, &len);
 
 
 	/* Display session parameters ... */
@@ -965,9 +970,10 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
 	$LOG(STS$K_INFO, "\tTUN/IP     :%s", inet_ntop(AF_INET, &g_ia_cliaddr, buf, sizeof(buf)));
 	$LOG(STS$K_INFO, "\tEncryption :%d", g_enc);
 
-	$LOG(STS$K_INFO, "\tTimers     :ping=%u, idle=%u, total=%u", g_timers_set.t_ping, g_timers_set.t_idle, g_timers_set.t_max);
+	$LOG(STS$K_INFO, "\tTimers     :ping=%u, idle=%u, total=%u, retry=%d",
+	     g_timers_set.t_ping.tv_sec, g_timers_set.t_idle.tv_sec, g_timers_set.t_max.tv_sec, g_timers_set.retry);
 
-	return	$LOG(STS$K_SUCCESS, "Session is establied", g_timers_set.t_ping);
+	return	$LOG(STS$K_SUCCESS, "Session is establied");
 }
 
 
@@ -985,7 +991,7 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
  *
  *   IMPLICITE OUTPUT
  */
-static int	process_pong	(
+static int	do_pong	(
 				int	 sd,
 		struct	sockaddr_in	*to,
 				void	*buf,
@@ -1013,6 +1019,35 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
 	return	STS$K_SUCCESS;
 }
 
+
+/*
+ *   DESCRIPTION: Send LOGOUT control sequence
+ *
+ *   INPUT:
+ *	sd:	UDP socket descriptor
+ *	to:	A remote client socket
+ *	bufp:	A buffer with the PING's PDU
+ *	buflen:	A size of the PDU
+ *
+ *   IMPLICITE OUTPUT
+ */
+static int	do_logout	(
+				int	 sd,
+		struct	sockaddr_in	*to
+				)
+{
+SVPN_PDU pdu = {0};
+
+	/* Form LOGOUT control packet ... */
+	pdu.magic64 = *magic64;
+	pdu.req = SVPN$K_REQ_LOGOUT;
+	pdu.proto = SVPN$K_PROTO_V1;
+
+	if ( !(1 & xmit_pkt (sd, &pdu, SVPN$SZ_PDUHDR, to)) )
+		return	$LOG(STS$K_ERROR, "[#%d]Error send LOGOUT", sd);
+
+	return	STS$K_SUCCESS;
+}
 
 
 
@@ -1121,7 +1156,19 @@ struct	sockaddr_in rsock = {0};
 				{
 				$LOG(STS$K_INFO, "Got control packet, req=%d, %d octets", pdu->req, rc);
 
-				process_pong (g_udp_sd, &g_server_sk, pdu, rc);
+				switch ( pdu->req )
+					{
+					case	SVPN$K_REQ_PING:
+						do_pong (g_udp_sd, &g_server_sk, pdu, rc);
+						break;
+
+					case	SVPN$K_REQ_LOGOUT:
+						$LOG(STS$K_INFO, "Close tunnel by LOGOUT request");
+						g_state = SVPN$K_STATEOFF;
+						do_logout (g_udp_sd, &g_server_sk);
+						g_exit_flag = 1;
+						break;
+					}
 
 				/* Skip rest of processing */
 				continue;
@@ -1132,9 +1179,6 @@ struct	sockaddr_in rsock = {0};
 
 			if ( g_enc != SVPN$K_ENC_NONE )
 				decode(g_enc, buf, rc, g_key, sizeof(g_key));
-
-			$DUMPHEX(buf, rc);
-
 
 			if ( rc != write(td, buf, rc) )
 				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on TUN device, write(%d octets), errno=%d", td, g_udp_sd, rc, __ba_errno__);
@@ -1285,6 +1329,8 @@ pthread_t	tid;
 			g_state = SVPN$K_STATECTL;
 			$LOG(STS$K_INFO, "State is CONTROL");
 
+			do_logout (g_udp_sd, &g_server_sk);
+
 			set_tun_state(0);	/* Down the tunX */
 
 			exec_script(&g_linkdown);
@@ -1296,7 +1342,7 @@ pthread_t	tid;
 			/* Check activity on the tunnel ... */
 			if ( !atomic_load(&g_input_count) )
 				{
-				if ( (++idle_count) > 3 )
+				if ( (++idle_count) >= g_timers_set.retry )
 					{
 					$LOG(STS$K_ERROR, "Zero activity has been detected, close data channel");
 					g_state = SVPN$K_STATEOFF;
@@ -1323,6 +1369,12 @@ pthread_t	tid;
 			for (; status = sleep(status); );
 		#endif // WIN32
 		}
+
+
+	set_tun_state (0);
+	do_logout (g_udp_sd, &g_server_sk);
+
+
 
 	/* Get out !*/
 	$LOG(STS$K_INFO, "Exiting with exit_flag=%d!", g_exit_flag);

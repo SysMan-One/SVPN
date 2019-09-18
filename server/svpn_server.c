@@ -121,6 +121,10 @@
 #include	<linux/if_tun.h>
 #include	<linux/limits.h>
 #include	<stdatomic.h>
+#include	<net/if.h>
+#include	<netinet/tcp.h>
+#include	<netinet/ip.h>
+#include	<netinet/ip6.h>
 
 #endif
 
@@ -212,7 +216,8 @@ static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
 	g_tun_fd = -1,
 	g_mss = 0,			/* MTU for datagram			*/
 	g_mtu = 0,			/* MSS for TCP/SYN			*/
-	g_seq = 1;			/* A global sequence number		*/
+	g_outseq = 1,			/* A sequence number for sent PING	*/
+	g_inpseq;			/* A sequence number for received PONG	*/
 
 static	atomic_ullong g_input_count = 0;/* Should be increment by receiving from UDP */
 
@@ -222,7 +227,8 @@ ASC	g_tun = {$ASCINI("tunX:")},	/* OS specific TUN device name		*/
 	g_logfspec = {0}, g_confspec = {0},
 	g_bind = {0}, g_cliname = {0}, g_auth = {0},
 	g_network = {$ASCINI("192.168.1.0/24")}, g_cliaddr = {$ASCINI("192.168.1.2")}, g_locaddr = {$ASCINI("192.168.1.1")},
-	g_timers = {$ASCINI("7, 300, 13, 15")},
+	g_timers = {$ASCINI("7, 120, 13")},
+	g_keepalive = {$ASCINI("3, 3")},
 	g_climsg = {0}, g_linkup = {0}, g_linkdown = {0};
 
 
@@ -241,10 +247,11 @@ typedef	struct __svpn_timers__	{
 					/* ... wait "pong" from client for <t_ping> seconds	*/
 
 			t_max;		/* Seconds, total limit of time for established tunnel */
+	int	retry;
 
 } SVPN_TIMERS;
 
-static	SVPN_TIMERS	g_timers_set = { {7, 0}, {300, 0}, {13, 0}, {15, 0}};
+static	SVPN_TIMERS	g_timers_set = { {7, 0}, {120, 0}, {13, 0}, {600, 0}, 3};
 
 
 					/* PTHREAD's stuff is supposed to be used to control worker's
@@ -286,6 +293,7 @@ const OPTS optstbl [] =		/* Configuration options		*/
 	{$ASCINI("auth"),	&g_auth, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("network"),	&g_network, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("timers"),	&g_timers, ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("keepalive"),	&g_keepalive, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("encryption"),	&g_enc,	0,		OPTS$K_INT},
 	{$ASCINI("threads"),	&g_threads,	0,	OPTS$K_INT},
 	{$ASCINI("linkup"),	&g_linkup, ASC$K_SZ,	OPTS$K_STR},
@@ -346,12 +354,6 @@ char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 32 ], mask [ 32];
 		if ( cp = strtok_r( NULL, ",", &saveptr) )
 			{
 			status = strtoul(cp, &endptr, 0);
-			g_timers_set.t_ping.tv_sec = status;
-			}
-
-		if ( cp = strtok_r( NULL, ",", &saveptr) )
-			{
-			status = strtoul(cp, &endptr, 0);
 			g_timers_set.t_max.tv_sec = status;
 			}
 		}
@@ -368,8 +370,224 @@ char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 32 ], mask [ 32];
 	if ( !inet_pton(AF_INET, ia, &g_ia_local) )
 		return	$LOG(STS$K_ERROR, "Error converting IA=%s from %.*s", ia, $ASCPTR(&g_locaddr));
 
+	status = sscanf($ASCPTR(&g_keepalive), "%d , %d" , &g_timers_set.t_ping.tv_sec, &g_timers_set.retry);
+
 	return	STS$K_SUCCESS;
 }
+
+
+
+
+/*
+ * change TCP MSS option in SYN/SYN-ACK packets, if present
+ * this is generic for IPv4 and IPv6, as the TCP header is the same
+ */
+#define	$TCPH_GET_DOFF(d) (((d) & 0xF0) >> 2)
+
+/*
+ * The following macro is used to update an
+ * internet checksum.  "acc" is a 32-bit
+ * accumulation of all the changes to the
+ * checksum (adding in old 16-bit words and
+ * subtracting out new words), and "cksum"
+ * is the checksum value to be updated.
+ */
+static inline unsigned short adjust_checksum	(int acc, unsigned short csum)
+{
+int _acc = acc;
+
+	_acc += (csum);
+
+	if (_acc < 0)
+		{
+		_acc = -_acc;
+		_acc = (_acc >> 16) + (_acc & 0xffff);
+		_acc += _acc >> 16;
+		(csum) = (uint16_t) ~_acc;
+		}
+	else	{
+		_acc = (_acc >> 16) + (_acc & 0xffff);
+		_acc += _acc >> 16;
+		(csum) = (uint16_t) _acc;
+		}
+
+	return	csum;
+}
+
+
+void	mss_fixup_dowork (
+			char	*buf,
+			int	bufsz,
+		unsigned short	maxmss
+			)
+{
+struct tcphdr	*tcph = (struct tcphdr *) buf;
+int	hlen, olen, optlen, accumulate;
+uint8_t *opt;
+uint16_t *mss;
+
+	//$DUMPHEX(tcph, bufsz);
+	//$IFTRACE(debug, "TH_OFF=%#x", tcph->th_off);
+
+	hlen = tcph->th_off * 4;
+
+	//$DUMPHEX(tcph, hlen);
+
+
+	/* Invalid header length or header without options. */
+	if ( (hlen <= sizeof (struct tcphdr)) || (hlen > bufsz) )
+		return;
+
+	//$DUMPHEX(tcph, hlen);
+
+	for (olen = hlen - sizeof (struct tcphdr), opt = (uint8_t *)(tcph + 1);
+		olen > 0; olen -= optlen, opt += optlen)
+		{
+		if (*opt == TCPOPT_EOL)
+			break;
+		else if (*opt == TCPOPT_NOP)
+			optlen = 1;
+		else	{
+			optlen = *(opt + 1);
+
+			if (optlen <= 0 || optlen > olen)
+				break;
+
+			if (*opt == TCPOPT_MAXSEG)
+				{
+				if (optlen != TCPOLEN_MAXSEG)
+					continue;
+
+				mss = (uint16_t *)(opt + 2);
+
+				if (ntohs (*mss) > maxmss)
+					{
+					$IFTRACE(g_trace, "MSS: %d -> %d", ntohs (*mss), maxmss);
+
+					accumulate = *mss;
+					*mss = htons (maxmss);
+					accumulate -= *mss;
+
+					tcph->check = adjust_checksum (accumulate, tcph->check);
+					}
+				}
+			}
+		}
+}
+
+
+
+
+/*
+ * Lower MSS on TCP SYN packets to fix MTU
+ * problems which arise from protocol
+ * encapsulation.
+ */
+#define	$IPH_GET_LEN(v)	(((v) & 0x0F) << 2)
+
+/*
+ * IPv4 packet: find TCP header, check flags for "SYN"
+ *              if yes, hand to mss_fixup_dowork()
+ */
+static inline void	mss_fixup_ipv4 (
+		char	*buf,
+		int	 bufsz,
+	unsigned short	 maxmss
+			)
+{
+struct iphdr	*iph;
+int	hlen;
+struct	tcphdr	*tcph;
+
+	/* Too short ? */
+	if ( bufsz < sizeof(struct iphdr) )
+		return;
+
+	iph = (struct iphdr *) buf;
+	hlen = $IPH_GET_LEN (iph->ihl);
+
+	if ( (iph->protocol == IPPROTO_TCP)				/* MSS is only for TCP Protocol	*/
+		&& (ntohs (iph->tot_len) == bufsz)			/* Check IP Header declared length against real IP packet size */
+		&& ((ntohs (iph->frag_off) & IP_OFFMASK) == 0)		/* Don't try to do anything with fragments	*/
+		&& (hlen <= bufsz)					/* Check IP Header length */
+		&& ((bufsz - hlen) >= (int) sizeof (struct tcphdr)) )	/* Is the place for TCP Header ?*/
+		{
+		tcph = (struct tcphdr *)  &buf[hlen];
+
+		if (tcph->th_flags & TH_SYN)
+			mss_fixup_dowork (tcph, bufsz - hlen, maxmss);
+		}
+}
+
+/*
+ * IPv6 packet: find TCP header, check flags for "SYN"
+ *              if yes, hand to mss_fixup_dowork()
+ *              (IPv6 header structure is sufficiently different from IPv4...)
+ */
+static inline void	mss_fixup_ipv6 (
+		char	*buf,
+		int	 bufsz,
+	unsigned short	 maxmss
+			)
+{
+struct ip6_hdr *iph;
+struct	tcphdr	*tcph;
+
+	/* Too short ? */
+	if ( bufsz < sizeof(struct ip6_hdr) )
+		return;
+
+	iph = (struct iphdr *) buf;
+
+	/* do we have the full IPv6 packet?
+	* "payload_len" does not include IPv6 header (+40 bytes)
+	*/
+	if ( bufsz != (ntohs(iph->ip6_plen) + sizeof(struct ip6_hdr)) )
+		return;
+
+	/* follow header chain until we reach final header, then check for TCP
+	*
+	* An IPv6 packet could, theoretically, have a chain of multiple headers
+	* before the final header (TCP, UDP, ...), so we'd need to walk that
+	* chain (see RFC 2460 and RFC 6564 for details).
+	*
+	* In practice, "most typically used" extention headers (AH, routing,
+	* fragment, mobility) are very unlikely to be seen inside an OpenVPN
+	* tun, so for now, we only handle the case of "single next header = TCP"
+	*/
+	if ( iph->ip6_nxt != IPPROTO_TCP )
+		return;
+
+	tcph = (struct tcphdr *)  &buf[sizeof(struct ip6_hdr)];
+
+	if (tcph->th_flags & TH_SYN)
+		mss_fixup_dowork (tcph, bufsz - sizeof(struct ip6_hdr), maxmss - 20);
+
+}
+
+
+
+static inline void	mss_fixup (
+		char	*buf,
+		int	 bufsz,
+	unsigned short	 maxmss
+			)
+{
+struct iphdr	*iph = (struct iphdr *) buf;
+
+
+
+	if ( iph->version == 4 )
+		return	mss_fixup_ipv4 (buf, bufsz, maxmss);
+
+	if ( iph->version == 6 )
+		return	mss_fixup_ipv6 (buf, bufsz, maxmss);
+
+}
+
+
+
+
 
 
 
@@ -852,6 +1070,35 @@ int	i;
 }
 
 
+/*
+ *   DESCRIPTION: Send LOGOUT control sequence
+ *
+ *   INPUT:
+ *	sd:	UDP socket descriptor
+ *	to:	A remote client socket
+ *	bufp:	A buffer with the PING's PDU
+ *	buflen:	A size of the PDU
+ *
+ *   IMPLICITE OUTPUT
+ */
+static int	do_logout	(
+				int	 sd,
+		struct	sockaddr_in	*to
+				)
+{
+int	status, len = 0, v_type = 0, seq = 0;
+SVPN_PDU pdu = {0};
+
+	/* Form LOGOUT control packet ... */
+	pdu.magic64 = *magic64;
+	pdu.req = SVPN$K_REQ_LOGOUT;
+	pdu.proto = SVPN$K_PROTO_V1;
+
+	if ( !(1 & xmit_pkt (sd, &pdu, SVPN$SZ_PDUHDR, to)) )
+		return	$LOG(STS$K_ERROR, "[#%d]Error send LOGOUT", sd);
+
+	return	STS$K_SUCCESS;
+}
 
 /*
  *   DESCRIPTION: process has been received PONG request.
@@ -863,24 +1110,31 @@ int	i;
  *
  *   IMPLICITE OUTPUT
  */
-static int	process_pong	(
+static int	do_pong	(
 				void	*buf,
 				int	 buflen
 				)
 {
-int	status, len = 0, v_type = 0, seq = 0;
+int	status, len = 0, v_type = 0;
 SVPN_PDU *pdu = (SVPN_PDU *) buf;
 struct	timespec  now ={0};
+char	lobuf[64];
+
 	/*
 	 * Extract SEQUENCE attribute
 	 */
-	len = sizeof(seq);
-	if ( !(1 & (tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_SEQ, &v_type, &seq, &len))) )
+	len = sizeof(g_inpseq);
+	if ( !(1 & (tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_SEQ, &v_type, &g_inpseq, &len))) )
 		$LOG(STS$K_WARN, "No attribute %#x", g_udp_sd, SVPN$K_TAG_SEQ);
 
 	len = sizeof(now);
 	if ( !(1 & (tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_TIME, &v_type, &now, &len))) )
 		$LOG(STS$K_WARN, "No attribute %#x", g_udp_sd, SVPN$K_TAG_TIME);
+
+
+	/* Check sequence */
+	if ( g_outseq - g_inpseq )
+		$LOG(STS$K_WARN, "Got PONG #%d is out of sequence (#%d)", g_inpseq, g_outseq);
 
 	return	STS$K_SUCCESS;
 }
@@ -994,14 +1248,14 @@ struct	timespec now = {0}, etime = {0}, delta = {13, 0};
 				switch (pdu->req)
 					{
 					case	SVPN$K_REQ_PONG:
-						process_pong(buf, rc);
+						do_pong(buf, rc);
 						atomic_fetch_add(&g_input_count, 1);	/* Increment inputs count !*/
 						break;
 
 					case	SVPN$K_REQ_LOGOUT:
 						$LOG(STS$K_INFO, "Close tunnel on LOGOUT request");
-						    g_state = SVPN$K_STATEOFF;
-						   break;
+						g_state = SVPN$K_STATEOFF;
+						break;
 
 					default:
 						g_state = SVPN$K_STATEOFF;
@@ -1017,8 +1271,6 @@ struct	timespec now = {0}, etime = {0}, delta = {13, 0};
 
 			if ( g_enc != SVPN$K_ENC_NONE )
 				decode(g_enc, buf, rc, g_key, sizeof(g_key));
-
-			$DUMPHEX(buf, rc);
 
 			if ( rc != write(td, buf, rc) )
 				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on TUN device, write(%d octets), errno=%d", td, g_udp_sd, rc, __ba_errno__);
@@ -1047,6 +1299,10 @@ struct	timespec now = {0}, etime = {0}, delta = {13, 0};
 			atomic_fetch_add(&g_stat.btunrd, rc);
 			atomic_fetch_add(&g_stat.ptunrd, 1);
 
+
+			/* TCP's MSS Fixup */
+			if ( g_mss )
+				mss_fixup (buf, rc, g_mss);
 
 			if ( g_enc != SVPN$K_ENC_NONE )
 				encode(g_enc, buf, rc, g_key, sizeof(g_key));
@@ -1230,15 +1486,19 @@ SHA1Context	sha = {0};
 	buflen += adjlen;
 	bufsz -= adjlen;
 
-	tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_KEEPALIVE, SVPN$K_LONG, &g_timers_set.t_ping, sizeof(int), &adjlen);
+	tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_PING, SVPN$K_LONG, &g_timers_set.t_ping.tv_sec, sizeof(int), &adjlen);
 	buflen += adjlen;
 	bufsz -= adjlen;
 
-	tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_IDLE, SVPN$K_LONG, &g_timers_set.t_idle, sizeof(int), &adjlen);
+	tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_RETRY, SVPN$K_LONG, &g_timers_set.retry, sizeof(int), &adjlen);
 	buflen += adjlen;
 	bufsz -= adjlen;
 
-	tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_TOTAL, SVPN$K_LONG, &g_timers_set.t_max, sizeof(int), &adjlen);
+	tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_IDLE, SVPN$K_LONG, &g_timers_set.t_idle.tv_sec, sizeof(int), &adjlen);
+	buflen += adjlen;
+	bufsz -= adjlen;
+
+	tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_TOTAL, SVPN$K_LONG, &g_timers_set.t_max.tv_sec, sizeof(int), &adjlen);
 	buflen += adjlen;
 	bufsz -= adjlen;
 
@@ -1275,7 +1535,7 @@ SHA1Context	sha = {0};
  *
  *   IMPLICITE OUTPUT
  */
-static int	process_ping	(
+static int	do_ping	(
 				int	 sd,
 		struct	sockaddr_in	*to
 				)
@@ -1286,7 +1546,7 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
 SHA1Context	sha = {0};
 struct timespec now;
 
-	g_seq++;
+	g_outseq++;
 
 	/* Prepare PING request ... */
 	pdu->magic64 = *magic64;
@@ -1307,7 +1567,7 @@ struct timespec now;
 	buflen += adjlen;
 	bufsz -= adjlen;
 
-	if ( !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_SEQ, SVPN$K_LONG, &g_seq, sizeof(g_seq), &adjlen))) )
+	if ( !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_SEQ, SVPN$K_LONG, &g_outseq, sizeof(g_outseq), &adjlen))) )
 		return	$LOG(status, "[#%d]Error put attribute", g_udp_sd);
 	buflen += adjlen;
 	bufsz -= adjlen;
@@ -1315,9 +1575,9 @@ struct timespec now;
 	tlv_dump(pdu->data, buflen - SVPN$SZ_PDUHDR);
 
 	if ( !(1 & xmit_pkt (g_udp_sd, buf, buflen, to)) )
-		return	$LOG(STS$K_ERROR, "[#%d]Error send PING #%#x", g_udp_sd, g_seq);
+		return	$LOG(STS$K_ERROR, "[#%d]Error send PING #%#x", g_udp_sd, g_outseq);
 
-	$IFTRACE(g_trace, "[#%d]Sent PING #%#x", g_udp_sd, g_seq);
+	$IFTRACE(g_trace, "[#%d]Sent PING #%#x", g_udp_sd, g_outseq);
 
 	return	STS$K_SUCCESS;
 }
@@ -1442,7 +1702,7 @@ SVPN_STAT	l_stat = {0};
 			/* Check that we need to send PING request to performs that data channel is alive */
 			if ( !atomic_load(&g_input_count) )
 				{
-				if ( (++idle_count) > 3 )
+				if ( (++idle_count) >= g_timers_set.retry )
 					{
 					$LOG(STS$K_ERROR, "Zero activity has been detected, close data channel");
 					g_state = SVPN$K_STATEOFF;
@@ -1450,7 +1710,7 @@ SVPN_STAT	l_stat = {0};
 					}
 				else	{
 					$IFTRACE(g_trace, "No inputs from remote SVPN client, idle count is %d", idle_count);
-					process_ping(g_udp_sd, &g_client_sk);
+					do_ping(g_udp_sd, &g_client_sk);
 					}
 				}
 			else	{
@@ -1463,7 +1723,7 @@ SVPN_STAT	l_stat = {0};
 
 
 		/* Just hibernate for some interval to reduce consuming CPU ... */
-		status = 5;
+		status = g_timers_set.t_ping.tv_sec;
 
 		#ifdef WIN32
 			Sleep(status * 1000);

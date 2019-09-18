@@ -63,7 +63,8 @@ enum	{
 	SVPN$K_TAG_NETMASK,	/* in_addr	*/
 	SVPN$K_TAG_CLIADDR,	/* in_addr	*/
 	SVPN$K_TAG_IDLE,	/* WORD		*/
-	SVPN$K_TAG_KEEPALIVE,	/* WORD		*/
+	SVPN$K_TAG_PING,	/* WORD		*/
+	SVPN$K_TAG_RETRY,	/* WORD		*/
 	SVPN$K_TAG_TOTAL,	/* WORD		*/
 	SVPN$K_TAG_ENC,		/* OCTET	*/
 	SVPN$K_TAG_TRACE,	/* OCTET	*/
