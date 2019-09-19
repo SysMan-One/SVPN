@@ -20,6 +20,8 @@ INCLUDEPATH	+= ..\
 LIBS	+= -static -pthread -lrt
 
 
+
+
 if (linux-aarch64-g++):{
         message(Building ARM64/AArch64 )
         DEFINES		+= __ARCH__NAME__=\\\"ARM64\\\"

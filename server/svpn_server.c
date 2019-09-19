@@ -214,8 +214,8 @@ static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
 	g_threads = 3,			/* A size of the worker crew threads	*/
 	g_udp_sd = -1,
 	g_tun_fd = -1,
-	g_mss = 0,			/* MTU for datagram			*/
-	g_mtu = 0,			/* MSS for TCP/SYN			*/
+	g_mtu = 0,			/* MTU for datagram			*/
+	g_mss = 0,			/* MSS for TCP/SYN			*/
 	g_outseq = 1,			/* A sequence number for sent PING	*/
 	g_inpseq;			/* A sequence number for received PONG	*/
 
@@ -229,7 +229,9 @@ ASC	g_tun = {$ASCINI("tunX:")},	/* OS specific TUN device name		*/
 	g_network = {$ASCINI("192.168.1.0/24")}, g_cliaddr = {$ASCINI("192.168.1.2")}, g_locaddr = {$ASCINI("192.168.1.1")},
 	g_timers = {$ASCINI("7, 120, 13")},
 	g_keepalive = {$ASCINI("3, 3")},
-	g_climsg = {0}, g_linkup = {0}, g_linkdown = {0};
+	g_climsg = {0}, g_linkup = {0}, g_linkdown = {0},
+	g_fstat = {0};
+
 
 
 struct in_addr g_ia_network = {0}, g_ia_local = {0}, g_ia_cliaddr = {0} , g_netmask = {-1};
@@ -277,7 +279,7 @@ typedef struct	__svpn_stat
 		pnetwr;
 
 } SVPN_STAT;
-SVPN_STAT	g_stat = {0};
+SVPN_STAT	g_stat = {0}, g_stat_zero = {0};
 
 const OPTS optstbl [] =		/* Configuration options		*/
 {
@@ -300,6 +302,7 @@ const OPTS optstbl [] =		/* Configuration options		*/
 	{$ASCINI("linkdown"),	&g_linkdown, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("MTU"),	&g_mtu,	0,		OPTS$K_INT},
 	{$ASCINI("MSS"),	&g_mss,	0,		OPTS$K_INT},
+	{$ASCINI("stat"),	&g_fstat,ASC$K_SZ,	OPTS$K_STR},
 
 	OPTS_NULL
 };
@@ -328,10 +331,21 @@ char	cmd[NAME_MAX], ia[32];
 }
 
 
+static inline void	__bits2inaddr	(
+			int	bits,
+			void	*mask
+				)
+{
+unsigned	lmask = 0xFFFFFFFFUL;
+
+	*((unsigned *) mask) = htonl((lmask << (32 - bits)));
+}
+
+
 static	int	config_process	(void)
 {
-int	status = STS$K_SUCCESS;
-char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 32 ], mask [ 32];
+int	status = STS$K_SUCCESS, bits;
+char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64];
 
 	/* /TIMERS*/
 	$ASCLEN(&g_timers) = __util$uncomment ($ASCPTR(&g_timers), $ASCLEN(&g_timers), '!');
@@ -362,6 +376,12 @@ char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 32 ], mask [ 32];
 	if ( !inet_pton(AF_INET, ia, &g_ia_network) )
 		return	$LOG(STS$K_ERROR, "Error converting IA=%s from %.*s", ia, $ASCPTR(&g_network));
 
+	if ( bits = atoi(mask) )
+		__bits2inaddr(bits, &g_netmask);
+
+	inet_ntop(AF_INET, &g_netmask, mask, sizeof(mask));
+	$IFTRACE(g_trace, "NETWORK:%s/%s", ia, mask);
+
 	sscanf($ASCPTR(&g_cliaddr), "%[^/\n]/%[^\n]" , ia, mask);
 	if ( !inet_pton(AF_INET, ia, &g_ia_cliaddr) )
 		return	$LOG(STS$K_ERROR, "Error converting IA=%s from %.*s", ia, $ASCPTR(&g_cliaddr));
@@ -375,7 +395,35 @@ char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 32 ], mask [ 32];
 	return	STS$K_SUCCESS;
 }
 
+const	mode_t f_mode =  0777; //S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
 
+int	stat_write	(void)
+{
+struct	tm	tmnow = {0};
+char	fname [ NAME_MAX] = {0};
+struct iovec iov [] = { {&tmnow, sizeof(tmnow)}, {&g_stat, sizeof(g_stat)} };
+int	fd = -1, iovlen = sizeof(tmnow) + sizeof(g_stat);
+
+	if ( !$ASCLEN(&g_fstat) )
+		return	STS$K_SUCCESS;
+
+	__util$timbuf(NULL, &tmnow);
+	sprintf(fname, "%.*s-%04d-%02d", $ASC(&g_fstat), tmnow.tm_year, tmnow.tm_mon);
+
+	if ( 0 > (fd = open (fname, O_CREAT | O_WRONLY | O_APPEND, f_mode)) )
+		return	$LOG(STS$K_ERROR, "open(%s)->%d, errno=%d", fname, fd, errno);
+
+
+	ssize_t writev(int fd, const struct iovec *iov, int iovcnt);
+
+	if ( iovlen  != writev(fd, iov, $ARRSZ(iov)) )
+		return	$LOG(STS$K_ERROR, "Statistic write error, writev(%s, %d octets), errno=%d", fname, iovlen, errno);
+
+
+	close(fd);
+
+	return	STS$K_SUCCESS;
+}
 
 
 /*
@@ -1669,6 +1717,8 @@ SVPN_STAT	l_stat = {0};
 							 */
 			{
 			idle_count = 0;
+			g_stat = g_stat_zero;
+
 
 			exec_script(&g_linkup);
 
@@ -1689,6 +1739,10 @@ SVPN_STAT	l_stat = {0};
 			set_tun_state(0);	/* Down the tunX */
 
 			exec_script(&g_linkdown);
+
+			/* Write session statistic record */
+			stat_write();
+
 
 			g_state = SVPN$K_STATECTL;
 			$LOG(STS$K_INFO, "State is CONTROL");
