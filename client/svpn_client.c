@@ -1174,7 +1174,7 @@ struct	sockaddr_in rsock = {0};
 				continue;
 				}
 
-			$IFTRACE(g_trace, "UDP RD: %d octets", rc);
+			//$IFTRACE(g_trace, "UDP RD: %d octets", rc);
 
 
 			if ( g_enc != SVPN$K_ENC_NONE )
@@ -1183,7 +1183,7 @@ struct	sockaddr_in rsock = {0};
 			if ( rc != write(td, buf, rc) )
 				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on TUN device, write(%d octets), errno=%d", td, g_udp_sd, rc, __ba_errno__);
 
-			$IFTRACE(g_trace, "TUN WR: %d octets", rc);
+			//$IFTRACE(g_trace, "TUN WR: %d octets", rc);
 			}
 		else
 #ifdef WIN32
@@ -1204,7 +1204,7 @@ struct	sockaddr_in rsock = {0};
 			slen = sizeof(struct sockaddr_in);
 
 
-			$IFTRACE(g_trace, "TUN RD: %d octets", rc);
+			//$IFTRACE(g_trace, "TUN RD: %d octets", rc);
 
 			if ( g_enc != SVPN$K_ENC_NONE )
 				encode(g_enc, buf, rc, g_key, sizeof(g_key));
@@ -1213,7 +1213,7 @@ struct	sockaddr_in rsock = {0};
 				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on UDP socket, sendto(%d octets), errno=%d", td, g_udp_sd, rc, errno);
 
 
-			$IFTRACE(g_trace, "UDP WR: %d octets", rc);
+			//$IFTRACE(g_trace, "UDP WR: %d octets", rc);
 			}
 		else
 #ifdef WIN32
