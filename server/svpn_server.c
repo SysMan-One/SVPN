@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNSRV"
-#define	__IDENT__	"X.00-01"
-#define	__REV__		"0.0.01"
+#define	__IDENT__	"X.00-02"
+#define	__REV__		"0.0.02"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -1445,12 +1445,12 @@ va_list ap;
  */
 static int	control	(void)
 {
-int	status, bufsz, adjlen = 0, buflen = 0, v_type = 0, ulen = 0, plen = 0;
+int	status, bufsz, adjlen = 0, buflen = 0, v_type = 0, ulen = 0, plen = 0, revlen = 0;
 struct pollfd pfd = {g_udp_sd, POLLIN, 0 };
-char buf[SVPN$SZ_IOBUF], salt[SVPN$SZ_SALT], *bufp, sfrom[64] = {0}, user[SVPN$SZ_USER], pass[SVPN$SZ_PASS];
+char	buf[SVPN$SZ_IOBUF], salt[SVPN$SZ_SALT], *bufp, sfrom[64] = {0}, user[SVPN$SZ_USER], pass[SVPN$SZ_PASS],
+	digest[SVPN$SZ_DIGEST], rev[255] = {0};
 SVPN_PDU *pdu = (SVPN_PDU *) buf;
 struct sockaddr_in from = {0};
-char	digest[SVPN$SZ_DIGEST];
 SHA1Context	sha = {0};
 
 	/* Accept LOGIN request from any IP ... */
@@ -1488,8 +1488,13 @@ SHA1Context	sha = {0};
 	if ( !(1 & tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_USER, &v_type, user, &ulen)) )
 		return	$LOG(STS$K_ERROR, "[#%d]No USERNAME in request", g_udp_sd);
 
-	$IFTRACE(g_trace, "[#%d]Got LOGIN from  %.*s@%s:%d, %d octets", g_udp_sd,
-		 ulen, user, sfrom, ntohs(from.sin_port), buflen);
+	revlen = sizeof(rev);
+	if ( !(1 & tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_REV, &v_type, rev, &revlen)) )
+		$LOG(STS$K_WARN, "[#%d]No REVISION in request", g_udp_sd);
+
+
+	$IFTRACE(g_trace, "[#%d]Got LOGIN from  %.*s@%s:%d (%.*s), %d octets", g_udp_sd,
+		 ulen, user, sfrom, ntohs(from.sin_port), revlen, rev, buflen);
 
 
 	/* So, authenticaion was successfull, now we can form client's option list and send ACCEPT;
@@ -1648,6 +1653,7 @@ int	main	(int argc, char **argv)
 int	status, idle_count;
 pthread_t	tid;
 SVPN_STAT	l_stat = {0};
+char	buf[1024];
 
 	$LOG(STS$K_INFO, "Rev: " __IDENT__ "/"  __ARCH__NAME__   ", (built  at "__DATE__ " " __TIME__ " with CC " __VERSION__ ")");
 
@@ -1723,7 +1729,7 @@ SVPN_STAT	l_stat = {0};
 			exec_script(&g_linkup);
 
 			g_state = SVPN$K_STATETUN;
-			$LOG(STS$K_INFO, "State is TUNNELING");
+			$LOG(STS$K_INFO, "IP: %s is ONLINE, state is TUNNELING", inet_ntop(AF_INET, &g_client_sk.sin_addr, buf, sizeof(buf)));
 
 			/* Send signal to the workers ... */
 			pthread_mutex_unlock (&crew_mtx);
@@ -1745,7 +1751,7 @@ SVPN_STAT	l_stat = {0};
 
 
 			g_state = SVPN$K_STATECTL;
-			$LOG(STS$K_INFO, "State is CONTROL");
+			$LOG(STS$K_INFO, "IP: %s is OFFLINE, state is CONTROL", inet_ntop(AF_INET, &g_client_sk.sin_addr, buf, sizeof(buf)));
 
 			continue;
 			}

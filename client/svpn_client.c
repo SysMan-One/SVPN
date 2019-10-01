@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNCLNT"
-#define	__IDENT__	"X.00-02"
-#define	__REV__		"0.0.02"
+#define	__IDENT__	"X.00-03"
+#define	__REV__		"0.0.03"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -868,7 +868,7 @@ va_list ap;
  */
 static int	control	(void)
 {
-int	status, len = 0, buflen = 0, v_type = 0;
+int	status, len = 0, buflen = 0, v_type = 0, bufsz = 0;
 char buf[SVPN$SZ_IOBUF];
 SVPN_PDU *pdu = (SVPN_PDU *) buf;
 
@@ -876,13 +876,18 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
 	/* Send LOGIN <user> request
 	 *	pdu->digest = sha(header, salt, payload);
 	 */
-	memcpy(pdu->magic, SVPN$T_MAGIC, SVPN$SZ_MAGIC);
+	pdu->magic64 = *magic64; /* memcpy(pdu->magic, SVPN$T_MAGIC, SVPN$SZ_MAGIC); */
 	pdu->proto = SVPN$K_PROTO_V1;
 	pdu->req = SVPN$K_REQ_LOGIN;
-	buflen = SVPN$SZ_PDUHDR;
+	bufsz = sizeof(buf) - (buflen = SVPN$SZ_PDUHDR);
 
-	tlv_put (pdu->data, SVPN$SZ_USER, SVPN$K_TAG_USER, SVPN$K_BBLOCK, $ASCPTR(&g_user), $ASCLEN(&g_user), &len);
+	tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_REV, SVPN$K_BBLOCK, $ASCPTR(&__ident__), $ASCLEN(&__ident__), &len);
 	buflen += len;
+	bufsz -= len;
+
+	tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_USER, SVPN$K_BBLOCK, $ASCPTR(&g_user), $ASCLEN(&g_user), &len);
+	buflen += len;
+	bufsz -= len;
 
 	/* Compute HMAC*/
 	hmac_gen(pdu->digest, SVPN$SZ_DIGEST,

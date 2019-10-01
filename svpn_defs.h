@@ -71,7 +71,8 @@ enum	{
 	SVPN$K_TAG_MSG,		/* BBLOCK/ASCII	*/
 	SVPN$K_TAG_USER,	/* BBLOCK/ASCII	*/
 	SVPN$K_TAG_TIME,	/* timespec	*/
-	SVPN$K_TAG_SEQ		/* LONGWORD	*/
+	SVPN$K_TAG_SEQ,		/* LONGWORD	*/
+	SVPN$K_TAG_REV		/* BBLOCK/ASCII	*/
 
 };
 
