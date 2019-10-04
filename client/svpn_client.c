@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNCLNT"
-#define	__IDENT__	"X.00-03"
-#define	__REV__		"0.0.03"
+#define	__IDENT__	"X.00-04"
+#define	__REV__		"0.0.04"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -224,7 +224,9 @@ ASC	g_tun = {$ASCINI("tun33")},	/* OS specific TUN device name		*/
 	g_auth = {0}, g_user = {0},
 	g_timers = {0},
 	g_linkup = {0}, g_linkdown = {0},
-	g_server = {0}, g_cliname = {0}, g_climsg = {0};
+	g_server = {0}, g_cliname = {0}, g_climsg = {0},
+	g_update_url = {0};		/* An URL is supposed to be used at client side
+					  to performs autoupdate */
 
 char	g_salt[SVPN$SZ_SALT];
 char	g_key[SVPN$SZ_DIGEST];
@@ -936,7 +938,15 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
 	if ( (1 & tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_MSG, &v_type, $ASCPTR(&g_climsg), &len)) )
 		{
 		$ASCLEN(&g_climsg) = (unsigned char) len;
-		$LOG(STS$K_INFO, "[%d]Gotta message from server : %.*s", g_udp_sd, $ASC(&g_climsg));
+		$LOG(STS$K_INFO, "[%d]Gotta message    : %.*s", g_udp_sd, $ASC(&g_climsg));
+		}
+
+
+	len = ASC$K_SZ;
+	if ( (1 & tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_UPDURL, &v_type, $ASCPTR(&g_update_url), &len)) )
+		{
+		$ASCLEN(&g_update_url) = (unsigned char) len;
+		$LOG(STS$K_INFO, "[%d]Gotta update URL : %.*s", g_udp_sd, $ASC(&g_update_url));
 		}
 
 	len = sizeof(g_ia_network);
@@ -969,7 +979,7 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
 
 
 	/* Display session parameters ... */
-	$LOG(STS$K_INFO, "Session parameters :");
+	$LOG(STS$K_INFO, "Session parameters  :");
 	$LOG(STS$K_INFO, "\tNetwork    :%s", inet_ntop(AF_INET, &g_ia_network, buf, sizeof(buf)));
 	$LOG(STS$K_INFO, "\tNetmask    :%s", inet_ntop(AF_INET, &g_ia_netmask, buf, sizeof(buf)));
 	$LOG(STS$K_INFO, "\tTUN/IP     :%s", inet_ntop(AF_INET, &g_ia_cliaddr, buf, sizeof(buf)));
@@ -978,7 +988,7 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
 	$LOG(STS$K_INFO, "\tTimers     :ping=%u, idle=%u, total=%u, retry=%d",
 	     g_timers_set.t_ping.tv_sec, g_timers_set.t_idle.tv_sec, g_timers_set.t_max.tv_sec, g_timers_set.retry);
 
-	return	$LOG(STS$K_SUCCESS, "Session is establied");
+	return	$LOG(STS$K_SUCCESS, "Session is established");
 }
 
 

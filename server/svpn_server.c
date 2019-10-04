@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNSRV"
-#define	__IDENT__	"X.00-02"
-#define	__REV__		"0.0.02"
+#define	__IDENT__	"X.00-03"
+#define	__REV__		"0.0.03"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -230,7 +230,9 @@ ASC	g_tun = {$ASCINI("tunX:")},	/* OS specific TUN device name		*/
 	g_timers = {$ASCINI("7, 120, 13")},
 	g_keepalive = {$ASCINI("3, 3")},
 	g_climsg = {0}, g_linkup = {0}, g_linkdown = {0},
-	g_fstat = {0};
+	g_fstat = {0},
+	g_update_url = {0};		/* An URL is supposed to be used at client side
+					  to performs autoupdate */
 
 
 
@@ -303,6 +305,7 @@ const OPTS optstbl [] =		/* Configuration options		*/
 	{$ASCINI("MTU"),	&g_mtu,	0,		OPTS$K_INT},
 	{$ASCINI("MSS"),	&g_mss,	0,		OPTS$K_INT},
 	{$ASCINI("stat"),	&g_fstat,ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("update_url"),	&g_update_url,ASC$K_SZ,	OPTS$K_STR},
 
 	OPTS_NULL
 };
@@ -926,7 +929,7 @@ int	slen = sizeof(struct sockaddr_in);
 
 #ifdef WIN32
 		if ( (status < 0) && (__ba_errno__ == WSAEINTR) )
-#else
+#elsel
 		if ( (status < 0) && (__ba_errno__ == EINTR) )
 #endif
 			{
@@ -1522,6 +1525,17 @@ SHA1Context	sha = {0};
 		buflen += adjlen;
 		bufsz -= adjlen;
 		}
+
+
+	if ( $ASCLEN(&g_update_url) )
+		{
+		if (  !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_UPDURL, SVPN$K_BBLOCK, $ASCPTR(&g_update_url), $ASCLEN(&g_update_url), &adjlen))) )
+			return	$LOG(status, "[#%d]Error put attribute", g_udp_sd);
+
+		buflen += adjlen;
+		bufsz -= adjlen;
+		}
+
 
 	tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_NET, SVPN$K_IP, &g_ia_network, sizeof(struct in_addr), &adjlen);
 	buflen += adjlen;
