@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNSRV"
-#define	__IDENT__	"X.00-03"
-#define	__REV__		"0.0.03"
+#define	__IDENT__	"X.00-04"
+#define	__REV__		"0.0.04"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -18,7 +18,7 @@
 **	create logical link for data transfers from/to client.
 **
 **  ABSTRACT: General logic of interoperation of the StarLet VPN server and client imagine follows:
-**
+**l
 **
 **
 **           Client                 |   Server               |
@@ -209,7 +209,7 @@ static const unsigned long long *magic64 = (unsigned long long *) &magic;
 
 static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
 	g_state = SVPN$K_STATECTL,	/* Initial state for SVPN-Server	*/
-	g_trace = 1,			/* A flag to produce extensible logging	*/
+	g_trace = 0,			/* A flag to produce extensible logging	*/
 	g_enc = SVPN$K_ENC_NONE,	/* Encryption mode, default is none	*/
 	g_threads = 3,			/* A size of the worker crew threads	*/
 	g_udp_sd = -1,
@@ -217,7 +217,8 @@ static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
 	g_mtu = 0,			/* MTU for datagram			*/
 	g_mss = 0,			/* MSS for TCP/SYN			*/
 	g_outseq = 1,			/* A sequence number for sent PING	*/
-	g_inpseq;			/* A sequence number for received PONG	*/
+	g_inpseq,			/* A sequence number for received PONG	*/
+	g_logsize = 0;			/* A maximum lofgile size in octets	*/
 
 static	atomic_ullong g_input_count = 0;/* Should be increment by receiving from UDP */
 
@@ -230,9 +231,7 @@ ASC	g_tun = {$ASCINI("tunX:")},	/* OS specific TUN device name		*/
 	g_timers = {$ASCINI("7, 120, 13")},
 	g_keepalive = {$ASCINI("3, 3")},
 	g_climsg = {0}, g_linkup = {0}, g_linkdown = {0},
-	g_fstat = {0},
-	g_update_url = {0};		/* An URL is supposed to be used at client side
-					  to performs autoupdate */
+	g_fstat = {0};
 
 
 
@@ -289,6 +288,7 @@ const OPTS optstbl [] =		/* Configuration options		*/
 	{$ASCINI("trace"),	&g_trace, 0,		OPTS$K_OPT},
 	{$ASCINI("bind"),	&g_bind, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("logfile"),	&g_logfspec, ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("logsize"),	&g_logsize, 0,		OPTS$K_INT},
 	{$ASCINI("devtun"),	&g_tun, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("cliname"),	&g_cliname, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("cliaddr"),	&g_cliaddr, ASC$K_SZ,	OPTS$K_STR},
@@ -305,10 +305,22 @@ const OPTS optstbl [] =		/* Configuration options		*/
 	{$ASCINI("MTU"),	&g_mtu,	0,		OPTS$K_INT},
 	{$ASCINI("MSS"),	&g_mss,	0,		OPTS$K_INT},
 	{$ASCINI("stat"),	&g_fstat,ASC$K_SZ,	OPTS$K_STR},
-	{$ASCINI("update_url"),	&g_update_url,ASC$K_SZ,	OPTS$K_STR},
 
 	OPTS_NULL
 };
+
+
+const char	help [] = { "Usage:\n" \
+		"$ %s [<options_list>]\n\n" \
+		"\t/CONFIG=<file>    configuration options file path\n" \
+		"\t/TRACE            enable extensible diagnostic output\n" \
+		"\t/LOGFILE=<file>   a specification of file to accept logging\n" \
+		"\t/LOGSIZE=<number> a maximum size of file in octets\n" \
+		"\t/LINKUP=<file>    script to be executed on tunnel up\n" \
+		"\t/LINKDOWN=<file>  script to be executed on tunnel down\n" \
+		"\t/AUTH=<user:pass> username and password pair\n" \
+		"\n\tExample of usage:\n\t $ %s -config=svpn_server.conf /trace\n" };
+
 
 
 int	exec_script	(
@@ -1527,16 +1539,6 @@ SHA1Context	sha = {0};
 		}
 
 
-	if ( $ASCLEN(&g_update_url) )
-		{
-		if (  !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_UPDURL, SVPN$K_BBLOCK, $ASCPTR(&g_update_url), $ASCLEN(&g_update_url), &adjlen))) )
-			return	$LOG(status, "[#%d]Error put attribute", g_udp_sd);
-
-		buflen += adjlen;
-		bufsz -= adjlen;
-		}
-
-
 	tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_NET, SVPN$K_IP, &g_ia_network, sizeof(struct in_addr), &adjlen);
 	buflen += adjlen;
 	bufsz -= adjlen;
@@ -1669,8 +1671,19 @@ pthread_t	tid;
 SVPN_STAT	l_stat = {0};
 char	buf[1024];
 
+	if ( (argc == 2) && (!strcmp(argv[1], "-v")) )
+		{
+		fprintf(stdout, "%s\n", __REV__);
+		return	1;
+		}
+
 	$LOG(STS$K_INFO, "Rev: " __IDENT__ "/"  __ARCH__NAME__   ", (built  at "__DATE__ " " __TIME__ " with CC " __VERSION__ ")");
 
+	if ( argc < 2 )
+		{
+		fprintf(stdout, help, argv[0], argv[0]);
+		return	-EINVAL;
+		}
 
 	/*
 	 * Process command line arguments
@@ -1717,7 +1730,7 @@ char	buf[1024];
 
 
 	/**/
-	for ( idle_count = 0; !g_exit_flag; )
+	for ( idle_count = 0; !g_exit_flag; __util$rewindlogfile(g_logsize) )
 		{
 		if ( g_state == SVPN$K_STATECTL )
 			{

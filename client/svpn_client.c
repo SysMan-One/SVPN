@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNCLNT"
-#define	__IDENT__	"X.00-04"
-#define	__REV__		"0.0.04"
+#define	__IDENT__	"X.00-05"
+#define	__REV__		"0.0.05"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -68,6 +68,9 @@
 **  MODIFICATION HISTORY:
 **
 **	17-SEP-2019	RRL	Now SVPN Client is pthread powered program.
+**
+**	 8-OCT-2019	RRL	Added version output on "-v" and display usage;
+**				added 'logsize' configuration option.
 **
 **--
 */
@@ -213,7 +216,8 @@ static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
 	g_tun_fd = -1,
 	g_tun_sdctl = -1,
 	g_mss = 0,			/* MTU for datagram			*/
-	g_mtu = 0;			/* MSS for TCP/SYN			*/
+	g_mtu = 0,			/* MSS for TCP/SYN			*/
+	g_logsize = 0;			/* A maximum lofgile size in octets	*/
 
 static	atomic_ullong g_input_count = 0;/* Should be increment by receiving from UDP */
 
@@ -261,13 +265,27 @@ const OPTS optstbl [] =		/* Configuration options		*/
 	{$ASCINI("logfile"),	&g_logfspec, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("devtun"),	&g_tun, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("auth"),	&g_auth, ASC$K_SZ,	OPTS$K_STR},
-	{$ASCINI("threads"),	&g_threads,	0,	OPTS$K_INT},
+	//{$ASCINI("threads"),	&g_threads,	0,	OPTS$K_INT},
 	{$ASCINI("linkup"),	&g_linkup, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("linkdown"),	&g_linkdown, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("server"),	&g_server, ASC$K_SZ,	OPTS$K_STR},
 
 	OPTS_NULL
 };
+
+
+
+const char	help [] = { "Usage:\n" \
+		"$ %s [<options_list>]\n\n" \
+		"\t/CONFIG=<file>    configuration options file path\n" \
+		"\t/TRACE            enable extensible diagnostic output\n" \
+		"\t/LOGFILE=<file>   a specification of file to accept logging\n" \
+		"\t/LOGSIZE=<number> a maximum size of file in octets\n" \
+		"\t/LINKUP=<file>    script to be executed on tunnel up\n" \
+		"\t/LINKDOWN=<file>  script to be executed on tunnel down\n" \
+		"\t/AUTH=<user:pass> username and password pair\n" \
+		"\t/SERVER=<ip:port> IP address of name and port pair of remote SVPN server\n" \
+		"\n\tExample of usage:\n\t $ %s -config=svpn_client.conf /trace\n" };
 
 
 int	exec_script	(
@@ -1261,10 +1279,23 @@ struct	sockaddr_in rsock = {0};
 int	main	(int argc, char **argv)
 {
 int	status, idle_count;
-
 pthread_t	tid;
 
+
+	if ( (argc == 2) && (!strcmp(argv[1], "-v")) )
+		{
+		fprintf(stdout, "%s\n", __REV__);
+		return	1;
+		}
+
 	$LOG(STS$K_INFO, "Rev: " __IDENT__ "/"  __ARCH__NAME__   ", (built  at "__DATE__ " " __TIME__ " with CC " __VERSION__ ")");
+
+	if ( argc < 2 )
+		{
+		fprintf(stdout, help, argv[0], argv[0]);
+		return	-EINVAL;
+		}
+
 
 	/*
 	 * Process command line arguments
@@ -1310,7 +1341,7 @@ pthread_t	tid;
 		}
 
 	/**/
-	for ( idle_count = 0;  !g_exit_flag; )
+	for ( idle_count = 0;  !g_exit_flag; __util$rewindlogfile(g_logsize) )
 		{
 		if ( g_state == SVPN$K_STATECTL )
 			{
