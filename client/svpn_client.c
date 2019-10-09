@@ -209,7 +209,7 @@ static const unsigned long long *magic64 = (unsigned long long *) &magic;
 
 static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
 	g_state = SVPN$K_STATECTL,	/* Initial state for SVPN-Server	*/
-	g_trace = 1,			/* A flag to produce extensible logging	*/
+	g_trace = 0,			/* A flag to produce extensible logging	*/
 	g_enc = SVPN$K_ENC_NONE,	/* Encryption mode, default is none	*/
 	g_threads = 1,			/* A size of the worker crew threads	*/
 	g_udp_sd = -1,
@@ -228,9 +228,7 @@ ASC	g_tun = {$ASCINI("tun33")},	/* OS specific TUN device name		*/
 	g_auth = {0}, g_user = {0},
 	g_timers = {0},
 	g_linkup = {0}, g_linkdown = {0},
-	g_server = {0}, g_cliname = {0}, g_climsg = {0},
-	g_update_url = {0};		/* An URL is supposed to be used at client side
-					  to performs autoupdate */
+	g_server = {0}, g_cliname = {0}, g_climsg = {0};
 
 char	g_salt[SVPN$SZ_SALT];
 char	g_key[SVPN$SZ_DIGEST];
@@ -263,6 +261,7 @@ const OPTS optstbl [] =		/* Configuration options		*/
 	{$ASCINI("config"),	&g_confspec, ASC$K_SZ,	OPTS$K_CONF},
 	{$ASCINI("trace"),	&g_trace, 0,		OPTS$K_OPT},
 	{$ASCINI("logfile"),	&g_logfspec, ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("logsize"),	&g_logsize, 0,		OPTS$K_INT},
 	{$ASCINI("devtun"),	&g_tun, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("auth"),	&g_auth, ASC$K_SZ,	OPTS$K_STR},
 	//{$ASCINI("threads"),	&g_threads,	0,	OPTS$K_INT},
@@ -287,13 +286,12 @@ const char	help [] = { "Usage:\n" \
 		"\t/SERVER=<ip:port> IP address of name and port pair of remote SVPN server\n" \
 		"\n\tExample of usage:\n\t $ %s -config=svpn_client.conf /trace\n" };
 
-
 int	exec_script	(
 		ASC	*script
 		)
 {
 int	status;
-char	cmd[NAME_MAX], ia[32];
+char	cmd[1024], ia[32];
 
 	if ( !$ASCLEN(script) )	/* Nothing to do */
 		return	STS$K_SUCCESS;
@@ -408,7 +406,7 @@ static int	sd = -1;
 	return	STS$K_SUCCESS;
 }
 
-
+static char tundev_path[] = {"/dev/tun"};
 
 static	int	tun_init	(
 			int	*fd
@@ -417,6 +415,16 @@ static	int	tun_init	(
 struct ifreq ifr = {0};
 int	err, sd = -1;
 struct sockaddr_in inaddr = {0};
+
+	if ( access ("/dev/tun", F_OK) )
+		{ /* /dev/tun - not found */
+		if ( access ("/dev/net/tun", F_OK) )
+			return	$LOG(STS$K_ERROR, "Error check paths: /dev/tun or /dev/net/tun");
+		else	strcpy(tundev_path, "/dev/net/tun" );
+		}
+
+	$IFTRACE(g_trace, "TUN's path: %s", tundev_path);
+
 
 	/* Flags: IFF_TUN   - TUN device (no Ethernet headers)
 	*        IFF_TAP   - TAP device
@@ -428,8 +436,8 @@ struct sockaddr_in inaddr = {0};
 	strncpy(ifr.ifr_name, $ASCPTR(&g_tun), IFNAMSIZ);
 
 	/* Allocate new /devtunX ... */
-	if ( 0 > (*fd = open("/dev/net/tun", O_RDWR)) )
-		return	$LOG(STS$K_ERROR, "open(/dev/net/tun), errno=%d", errno);
+	if ( 0 > (*fd = open(tundev_path, O_RDWR)) )
+		return	$LOG(STS$K_ERROR, "open(%s), errno=%d", tundev_path, errno);
 
 	if ( err = ioctl(*fd, TUNSETIFF, (void *)&ifr) )
 		{
@@ -488,8 +496,8 @@ int	err;
 	ifr.ifr_flags = IFF_TAP | IFF_NO_PI; // | IFF_MULTI_QUEUE;
 	strncpy(ifr.ifr_name, $ASCPTR(&g_tun), IFNAMSIZ);
 
-	if ( 0 > (*fd = open("/dev/net/tun", O_RDWR)) )
-		return	$LOG(STS$K_ERROR, "open(/dev/net/tun), errno=%d", errno);
+	if ( 0 > (*fd = open(tundev_path, O_RDWR)) )
+		return	$LOG(STS$K_ERROR, "open(*s), errno=%d", tundev_path, errno);
 
 	if ( err = ioctl(*fd, TUNSETIFF, (void *)&ifr) )
 		{
@@ -957,14 +965,6 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
 		{
 		$ASCLEN(&g_climsg) = (unsigned char) len;
 		$LOG(STS$K_INFO, "[%d]Gotta message    : %.*s", g_udp_sd, $ASC(&g_climsg));
-		}
-
-
-	len = ASC$K_SZ;
-	if ( (1 & tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_UPDURL, &v_type, $ASCPTR(&g_update_url), &len)) )
-		{
-		$ASCLEN(&g_update_url) = (unsigned char) len;
-		$LOG(STS$K_INFO, "[%d]Gotta update URL : %.*s", g_udp_sd, $ASC(&g_update_url));
 		}
 
 	len = sizeof(g_ia_network);
