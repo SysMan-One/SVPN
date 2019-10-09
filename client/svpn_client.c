@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNCLNT"
-#define	__IDENT__	"X.00-05"
-#define	__REV__		"0.0.05"
+#define	__IDENT__	"X.00-06"
+#define	__REV__		"0.0.06"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -71,6 +71,8 @@
 **
 **	 8-OCT-2019	RRL	Added version output on "-v" and display usage;
 **				added 'logsize' configuration option.
+**
+**	 9-OCT-2019	RRL	Added handling of the TRACE option from server.
 **
 **--
 */
@@ -721,9 +723,9 @@ char	*bufp = (char *) buf;
 		return	$LOG(STS$K_ERROR, "clock_gettime()->%d, errno=%d", status, __ba_errno__);
 #endif
 
-	__util$add_time (&now, &g_timers_set.t_idle, &etime);
+	__util$add_time (&now, &g_timers_set.t_io, &etime);
 
-	while ( !g_exit_flag )
+	while ( 1 )
 		{
 		/* Do we reach the end of I/O time ? */
 #ifdef WIN32
@@ -822,6 +824,7 @@ int	i;
 		{
 		if ( (signal(siglist[i], sig_handler)) == SIG_ERR )
 			$LOG(STS$K_ERROR, "Error establishing handler for signal %d/%#x, error=%d", siglist[i], siglist[i], __ba_errno__);
+		else	$IFTRACE(g_trace, "Set signal handler for #%d (%s)", siglist[i], strsignal(siglist[i]));
 		}
 }
 
@@ -961,11 +964,9 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
 	$ASCLEN(&g_cliname) = (unsigned char) len;
 
 	len = ASC$K_SZ;
+	$ASCLEN(&g_climsg) = 0;
 	if ( (1 & tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_MSG, &v_type, $ASCPTR(&g_climsg), &len)) )
-		{
 		$ASCLEN(&g_climsg) = (unsigned char) len;
-		$LOG(STS$K_INFO, "[%d]Gotta message    : %.*s", g_udp_sd, $ASC(&g_climsg));
-		}
 
 	len = sizeof(g_ia_network);
 	if ( !(1 & tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_NET, &v_type, &g_ia_network, &len)) )
@@ -995,15 +996,20 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
 	len = sizeof(int);
 	tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_TOTAL, &v_type, &g_timers_set.t_max.tv_sec, &len);
 
+	len = sizeof(int);
+	tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_TOTAL, &v_type, &g_trace, &len);
 
 	/* Display session parameters ... */
 	$LOG(STS$K_INFO, "Session parameters  :");
-	$LOG(STS$K_INFO, "\tNetwork    :%s", inet_ntop(AF_INET, &g_ia_network, buf, sizeof(buf)));
-	$LOG(STS$K_INFO, "\tNetmask    :%s", inet_ntop(AF_INET, &g_ia_netmask, buf, sizeof(buf)));
-	$LOG(STS$K_INFO, "\tTUN/IP     :%s", inet_ntop(AF_INET, &g_ia_cliaddr, buf, sizeof(buf)));
-	$LOG(STS$K_INFO, "\tEncryption :%d", g_enc);
 
-	$LOG(STS$K_INFO, "\tTimers     :ping=%u, idle=%u, total=%u, retry=%d",
+	$LOG(STS$K_INFO, "\tTrace      : %s", g_trace ? "ON" : "OFF");
+	$LOG(STS$K_INFO, "\tNetwork    : %s", inet_ntop(AF_INET, &g_ia_network, buf, sizeof(buf)));
+	$LOG(STS$K_INFO, "\tNetmask    : %s", inet_ntop(AF_INET, &g_ia_netmask, buf, sizeof(buf)));
+	$LOG(STS$K_INFO, "\tTUN/IP     : %s", inet_ntop(AF_INET, &g_ia_cliaddr, buf, sizeof(buf)));
+	$LOG(STS$K_INFO, "\tEncryption : %d", g_enc);
+	$LOG(STS$K_INFO, "\tMessage    : %.*s", $ASC(&g_climsg));
+
+	$LOG(STS$K_INFO, "\tTimers     : ping=%u, idle=%u, total=%u, retry=%d",
 	     g_timers_set.t_ping.tv_sec, g_timers_set.t_idle.tv_sec, g_timers_set.t_max.tv_sec, g_timers_set.retry);
 
 	return	$LOG(STS$K_SUCCESS, "Session is established");
@@ -1417,11 +1423,14 @@ pthread_t	tid;
 		}
 
 
-	set_tun_state (0);
-	do_logout (g_udp_sd, &g_server_sk);
+
+	set_tun_state (0);			/* Switch DOWN the tunX device */
+	do_logout (g_udp_sd, &g_server_sk);	/* Send LOGOUT control packet to close session */
 
 
 
 	/* Get out !*/
-	$LOG(STS$K_INFO, "Exiting with exit_flag=%d!", g_exit_flag);
+	$LOG(STS$K_INFO, "Exit with exit_flag=%d!", g_exit_flag);
+
+	return	STS$K_SUCCESS;
 }

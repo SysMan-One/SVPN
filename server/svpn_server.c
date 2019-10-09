@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNSRV"
-#define	__IDENT__	"X.00-04"
-#define	__REV__		"0.0.04"
+#define	__IDENT__	"X.00-05"
+#define	__REV__		"0.0.05"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -54,6 +54,9 @@
 **
 **  USAGE:
 **		$ ./BAGENT	[options]
+**
+**			-v, -?, -h, -o <file>, -d
+**
 **			/CONFIG=<configuration_file>
 **			/TRACE
 **			/LOGFILE=<fspec>
@@ -67,6 +70,9 @@
 **
 **  MODIFICATION HISTORY:
 **
+**	 9-OCT-2019	RRL	Added sending of TRACE option to SVPN client on LOGIN;
+**				added handling of unix-style arguments: -v, -?, -h, -o <file>, -d
+**
 **--
 */
 
@@ -77,6 +83,8 @@
 #include	<time.h>
 #include	<inttypes.h>
 #include	<signal.h>
+#include	<getopt.h>
+
 #include	"sha1.h"
 
 
@@ -935,13 +943,13 @@ int	slen = sizeof(struct sockaddr_in);
 #ifdef WIN32
 		if( 0 >  (status = WSAPoll(&pfd, 1, timespec2msec (delta))) && (__ba_errno__ != WSAEINTR) )
 #else
-		if( 0 >  (status = poll(&pfd, 1, timespec2msec (delta))) && (__ba_errno__ != EINTR) )
+		if( (0 >  (status = poll(&pfd, 1, timespec2msec (delta)))) && (__ba_errno__ != EINTR) )
 #endif // WIN32
 			return	$LOG(STS$K_ERROR, "[#%d] poll()->%d, errno=%d", sd, status, __ba_errno__);
 
 #ifdef WIN32
 		if ( (status < 0) && (__ba_errno__ == WSAEINTR) )
-#elsel
+#else
 		if ( (status < 0) && (__ba_errno__ == EINTR) )
 #endif
 			{
@@ -1129,6 +1137,7 @@ int	i;
 		{
 		if ( (signal(siglist[i], sig_handler)) == SIG_ERR )
 			$LOG(STS$K_ERROR, "Error establishing handler for signal %d/%#x, error=%d", siglist[i], siglist[i], __ba_errno__);
+		else	$IFTRACE(g_trace, "Set signal handler for #%d (%s)", siglist[i], strsignal(siglist[i]));
 		}
 }
 
@@ -1571,6 +1580,10 @@ SHA1Context	sha = {0};
 	buflen += adjlen;
 	bufsz -= adjlen;
 
+	tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_TRACE, SVPN$K_LONG, &g_trace, sizeof(int), &adjlen);
+	buflen += adjlen;
+	bufsz -= adjlen;
+
 
 	tlv_dump(pdu->data, buflen - SVPN$SZ_PDUHDR);
 
@@ -1653,6 +1666,44 @@ struct timespec now;
 
 
 
+int	handle_cmd_args(int argc, char *argv[])
+{
+int	option, idx, optval;
+struct option stat_opts[] = {
+     {"stat",     optional_argument, &optval,  1 },
+     {0, 0, 0,  0 }
+ };
+
+
+	/* Check command line options */
+	while( (option = getopt_long(argc, argv, "vdo:", stat_opts, &idx)) >= 0 )
+		{
+		switch(option)
+			{
+			case 'o':
+				__util$readconfig (optarg, optstbl);
+				break;
+
+			case 'd':
+				g_trace = 1;
+				break;
+
+			case 'v':
+				fprintf(stdout, "%s\n", __REV__);
+				exit (0);
+
+			case 'h':
+			case '?':
+				fprintf(stdout, help, argv[0], argv[0]);
+				exit (0);
+			}
+		}
+
+	return	STS$K_SUCCESS;
+}
+
+
+
 
 /*
  *   DESCRIPTION:
@@ -1671,19 +1722,9 @@ pthread_t	tid;
 SVPN_STAT	l_stat = {0};
 char	buf[1024];
 
-	if ( (argc == 2) && (!strcmp(argv[1], "-v")) )
-		{
-		fprintf(stdout, "%s\n", __REV__);
-		return	1;
-		}
+	handle_cmd_args(argc, argv);
 
 	$LOG(STS$K_INFO, "Rev: " __IDENT__ "/"  __ARCH__NAME__   ", (built  at "__DATE__ " " __TIME__ " with CC " __VERSION__ ")");
-
-	if ( argc < 2 )
-		{
-		fprintf(stdout, help, argv[0], argv[0]);
-		return	-EINVAL;
-		}
 
 	/*
 	 * Process command line arguments
@@ -1823,7 +1864,7 @@ char	buf[1024];
 		}
 
 	/* Get out !*/
-	$LOG(STS$K_INFO, "Exiting with exit_flag=%d!", g_exit_flag);
+	$LOG(STS$K_INFO, "Exit with exit_flag=%d!", g_exit_flag);
 
 	return	STS$K_SUCCESS;
 }
