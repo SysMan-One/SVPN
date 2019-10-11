@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNSRV"
-#define	__IDENT__	"X.00-05"
-#define	__REV__		"0.0.05"
+#define	__IDENT__	"X.00-08"
+#define	__REV__		"0.0.08"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -72,6 +72,12 @@
 **
 **	 9-OCT-2019	RRL	Added sending of TRACE option to SVPN client on LOGIN;
 **				added handling of unix-style arguments: -v, -?, -h, -o <file>, -d
+**
+**	10-OCT-2019	RRL	Reduced diagnostic messages;
+**				added /DELTAONLINE=<seconds>
+**
+**	11-OCT-2019	RRL	X.00-08 : Added ping/pong sequences checking;
+**				added backlog of IP address
 **
 **--
 */
@@ -226,7 +232,9 @@ static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
 	g_mss = 0,			/* MSS for TCP/SYN			*/
 	g_outseq = 1,			/* A sequence number for sent PING	*/
 	g_inpseq,			/* A sequence number for received PONG	*/
-	g_logsize = 0;			/* A maximum lofgile size in octets	*/
+	g_logsize = 0,			/* A maximum lofgile size in octets	*/
+	g_deltaonline = 300,		/* An interval of printing "Client still ONLINE" */
+	g_lenbacklog = 0;
 
 static	atomic_ullong g_input_count = 0;/* Should be increment by receiving from UDP */
 
@@ -239,7 +247,8 @@ ASC	g_tun = {$ASCINI("tunX:")},	/* OS specific TUN device name		*/
 	g_timers = {$ASCINI("7, 120, 13")},
 	g_keepalive = {$ASCINI("3, 3")},
 	g_climsg = {0}, g_linkup = {0}, g_linkdown = {0},
-	g_fstat = {0};
+	g_fstat = {0},
+	g_backlog = {0};
 
 
 
@@ -261,6 +270,8 @@ typedef	struct __svpn_timers__	{
 	int	retry;
 
 } SVPN_TIMERS;
+
+struct timespec	g_rtt;
 
 static	SVPN_TIMERS	g_timers_set = { {7, 0}, {120, 0}, {13, 0}, {600, 0}, 3};
 
@@ -312,7 +323,9 @@ const OPTS optstbl [] =		/* Configuration options		*/
 	{$ASCINI("linkdown"),	&g_linkdown, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("MTU"),	&g_mtu,	0,		OPTS$K_INT},
 	{$ASCINI("MSS"),	&g_mss,	0,		OPTS$K_INT},
+	{$ASCINI("deltaonline"),&g_deltaonline,	0,	OPTS$K_INT},
 	{$ASCINI("stat"),	&g_fstat,ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("backlog"),	&g_backlog,ASC$K_SZ,	OPTS$K_STR},
 
 	OPTS_NULL
 };
@@ -327,7 +340,7 @@ const char	help [] = { "Usage:\n" \
 		"\t/LINKUP=<file>    script to be executed on tunnel up\n" \
 		"\t/LINKDOWN=<file>  script to be executed on tunnel down\n" \
 		"\t/AUTH=<user:pass> username and password pair\n" \
-		"\n\tExample of usage:\n\t $ %s -config=svpn_server.conf /trace\n" };
+		"\n\tExample of usage:\n\t $ %s -config=svpn_server.conf /trace\n\n" };
 
 
 
@@ -1187,30 +1200,39 @@ static int	do_pong	(
 				int	 buflen
 				)
 {
-int	status, len = 0, v_type = 0;
+int	status, len = 0, v_type = 0, inpseq = 0;
 SVPN_PDU *pdu = (SVPN_PDU *) buf;
-struct	timespec  now ={0};
+struct	timespec  rtt ={0}, now;
 char	lobuf[64];
 
 	/*
 	 * Extract SEQUENCE attribute
 	 */
-	len = sizeof(g_inpseq);
-	if ( !(1 & (tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_SEQ, &v_type, &g_inpseq, &len))) )
+	len = sizeof(inpseq);
+	if ( !(1 & (tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_SEQ, &v_type, &inpseq, &len))) )
 		$LOG(STS$K_WARN, "No attribute %#x", g_udp_sd, SVPN$K_TAG_SEQ);
 
-	len = sizeof(now);
-	if ( !(1 & (tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_TIME, &v_type, &now, &len))) )
+	len = sizeof(rtt);
+	if ( !(1 & (tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_TIME, &v_type, &rtt, &len))) )
 		$LOG(STS$K_WARN, "No attribute %#x", g_udp_sd, SVPN$K_TAG_TIME);
 
+	$IFTRACE(g_trace, "[#%d]Received PONG #%#x", g_udp_sd, inpseq);
 
 	/* Check sequence */
-	if ( g_outseq - g_inpseq )
-		$LOG(STS$K_WARN, "Got PONG #%d is out of sequence (#%d)", g_inpseq, g_outseq);
+	if ( g_outseq - inpseq )
+		$LOG(STS$K_WARN, "PONG #%d is out of sequence (#%d)", g_inpseq, g_outseq);
+
+	/* Compute RTT */
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	__util$sub_time(&now, &rtt, &g_rtt);
+
+
+	/* Save last seen PONG's sequence for future using */
+	g_inpseq = inpseq;
 
 	return	STS$K_SUCCESS;
 }
-
 
 
 /*
@@ -1226,8 +1248,6 @@ char	buf [SVPN$SZ_IOBUF];
 SVPN_PDU *pdu = (SVPN_PDU *) buf;
 struct	timespec now = {0}, etime = {0}, delta = {13, 0};
 
-	$LOG(STS$K_INFO, "Starting ...");
-
 	/* Open channel to TUN device */
 	if ( !(1 & (rc = tun_open(&td))) )
 		return	g_exit_flag = $LOG(STS$K_ERROR, "Error allocating TUN device");
@@ -1237,7 +1257,7 @@ struct	timespec now = {0}, etime = {0}, delta = {13, 0};
 	 */
 	pfd[1].fd = td;
 
-	$LOG(STS$K_INFO, "[#%d-#%d]Main loop ...", td, g_udp_sd);
+	$IFTRACE(g_trace, "[#%d-#%d]Main loop ...", td, g_udp_sd);
 
 	while  ( !g_exit_flag )
 		{
@@ -1315,7 +1335,7 @@ struct	timespec now = {0}, etime = {0}, delta = {13, 0};
 			/* Is it's control packet begined with the magic prefix  ? */
 			if ( pdu->magic64 == *magic64 )
 				{
-				$LOG(STS$K_INFO, "Got control packet, req=%d, %d octets", pdu->req, rc);
+				$IFTRACE(g_trace, "Got control packet, req=%d, %d octets", pdu->req, rc);
 
 				switch (pdu->req)
 					{
@@ -1396,7 +1416,7 @@ struct	timespec now = {0}, etime = {0}, delta = {13, 0};
 		}
 
 
-	return	$LOG(STS$K_INFO, "Terminated");
+	$IFTRACE(g_trace, "Terminated");
 }
 
 
@@ -1457,8 +1477,6 @@ va_list ap;
 }
 
 
-
-
 /*
  *   DESCRIPTION: Performs accept and process request from remote client/peer according Phase I
  *	protocol
@@ -1480,7 +1498,6 @@ SHA1Context	sha = {0};
 	/* Accept LOGIN request from any IP ... */
 	from.sin_family = AF_INET;
 	from.sin_addr.s_addr = INADDR_ANY;
-
 
 	/* Wait for LOGIN from <USER> request ... */
 	$IFTRACE(g_trace, "[#%d]Wait for LOGIN from remote client ...", g_udp_sd);
@@ -1506,7 +1523,7 @@ SHA1Context	sha = {0};
 	if ( !(1 & hmac_check(pdu->digest, SVPN$SZ_DIGEST,
 			pdu, SVPN$SZ_HASHED, pdu->data, buflen - SVPN$SZ_PDUHDR, $ASCPTR(&g_auth), $ASCLEN(&g_auth),
 				NULL /* End-of-arguments marger !*/)) )
-		return	$LOG(STS$K_ERROR, "[#%d]Hash checking error", g_udp_sd);
+		return	$LOG(STS$K_ERROR, "[#%d]Autorization error", g_udp_sd);
 
 	ulen = sizeof(user);
 	if ( !(1 & tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_USER, &v_type, user, &ulen)) )
@@ -1517,7 +1534,7 @@ SHA1Context	sha = {0};
 		$LOG(STS$K_WARN, "[#%d]No REVISION in request", g_udp_sd);
 
 
-	$IFTRACE(g_trace, "[#%d]Got LOGIN from  %.*s@%s:%d (%.*s), %d octets", g_udp_sd,
+	$LOG(STS$K_INFO, "[#%d]Got LOGIN from  %.*s@%s:%d (%.*s), %d octets", g_udp_sd,
 		 ulen, user, sfrom, ntohs(from.sin_port), revlen, rev, buflen);
 
 
@@ -1584,8 +1601,8 @@ SHA1Context	sha = {0};
 	buflen += adjlen;
 	bufsz -= adjlen;
 
-
-	tlv_dump(pdu->data, buflen - SVPN$SZ_PDUHDR);
+	if ( g_trace )
+		tlv_dump(pdu->data, buflen - SVPN$SZ_PDUHDR);
 
 	/* Generate  HMAC */
 	hmac_gen(pdu->digest, SVPN$SZ_DIGEST,
@@ -1595,7 +1612,7 @@ SHA1Context	sha = {0};
 	if ( !(1 & xmit_pkt (g_udp_sd, buf, buflen, &from)) )
 		return	$LOG(STS$K_ERROR, "Error send ACCEPT to %s:$d", sfrom, ntohs(from.sin_port));
 
-	$IFTRACE(g_trace, "[#%d]Sent ACCEPT to  %.*s@%s:%d, %d octets", g_udp_sd,
+	$LOG(STS$K_SUCCESS, "[#%d]Sent ACCEPT to  %.*s@%s:%d, %d octets", g_udp_sd,
 		 ulen, user, sfrom, ntohs(from.sin_port), buflen);
 
 	/* Store client IP for future use */
@@ -1654,7 +1671,8 @@ struct timespec now;
 	buflen += adjlen;
 	bufsz -= adjlen;
 
-	tlv_dump(pdu->data, buflen - SVPN$SZ_PDUHDR);
+	if ( g_trace )
+		tlv_dump(pdu->data, buflen - SVPN$SZ_PDUHDR);
 
 	if ( !(1 & xmit_pkt (g_udp_sd, buf, buflen, to)) )
 		return	$LOG(STS$K_ERROR, "[#%d]Error send PING #%#x", g_udp_sd, g_outseq);
@@ -1663,7 +1681,6 @@ struct timespec now;
 
 	return	STS$K_SUCCESS;
 }
-
 
 
 int	handle_cmd_args(int argc, char *argv[])
@@ -1721,6 +1738,7 @@ int	status, idle_count;
 pthread_t	tid;
 SVPN_STAT	l_stat = {0};
 char	buf[1024];
+struct timespec deltaonline = {0, 0}, now;
 
 	handle_cmd_args(argc, argv);
 
@@ -1790,14 +1808,18 @@ char	buf[1024];
 							 * to performs works on data tunneling
 							 */
 			{
+			/* Reset seession specific counters */
 			idle_count = 0;
 			g_stat = g_stat_zero;
+			deltaonline.tv_sec = deltaonline.tv_nsec = 0;
+			g_outseq = g_inpseq = 0;
+			g_input_count = 0;
 
 
 			exec_script(&g_linkup);
 
 			g_state = SVPN$K_STATETUN;
-			$LOG(STS$K_INFO, "IP: %s is ONLINE, state is TUNNELING", inet_ntop(AF_INET, &g_client_sk.sin_addr, buf, sizeof(buf)));
+			$LOG(STS$K_INFO, "IP: %s is ONLINE", inet_ntop(AF_INET, &g_client_sk.sin_addr, buf, sizeof(buf)));
 
 			/* Send signal to the workers ... */
 			pthread_mutex_unlock (&crew_mtx);
@@ -1819,7 +1841,7 @@ char	buf[1024];
 
 
 			g_state = SVPN$K_STATECTL;
-			$LOG(STS$K_INFO, "IP: %s is OFFLINE, state is CONTROL", inet_ntop(AF_INET, &g_client_sk.sin_addr, buf, sizeof(buf)));
+			$LOG(STS$K_INFO, "IP: %s is OFFLINE", inet_ntop(AF_INET, &g_client_sk.sin_addr, buf, sizeof(buf)));
 
 			continue;
 			}
@@ -1827,18 +1849,22 @@ char	buf[1024];
 
 		if ( g_state == SVPN$K_STATETUN )
 			{
+
 			/* Check that we need to send PING request to performs that data channel is alive */
 			if ( !atomic_load(&g_input_count) )
 				{
-				if ( (++idle_count) >= g_timers_set.retry )
+				if ( (g_outseq - g_inpseq) > g_timers_set.retry )
 					{
-					$LOG(STS$K_ERROR, "Zero activity has been detected, close data channel");
+					$LOG(STS$K_ERROR, "Heartbit lost detected (PING #%d - PONG #%d)", g_outseq, g_inpseq);
 					g_state = SVPN$K_STATEOFF;
 					continue;
 					}
 				else	{
 					$IFTRACE(g_trace, "No inputs from remote SVPN client, idle count is %d", idle_count);
 					do_ping(g_udp_sd, &g_client_sk);
+
+					if ( (g_outseq - g_inpseq) > 1 )
+						$LOG(STS$K_WARN, "Heartbit lost detected (#%d/#%d)", (g_outseq - g_inpseq) - 1, g_timers_set.retry);
 					}
 				}
 			else	{
@@ -1847,6 +1873,32 @@ char	buf[1024];
 				}
 
 			atomic_store(&g_input_count, 0); /* Reset inputs counter */
+
+
+
+			if ( g_deltaonline && ((g_outseq - g_inpseq) <= 1) )
+				{
+				struct timespec ts = {g_deltaonline, 0};
+
+				#ifdef WIN32
+					timespec_get(&now, TIME_UTC);
+				#else
+					clock_gettime(CLOCK_REALTIME, &now);
+				#endif
+
+				if ( __util$iszero(&deltaonline, sizeof(deltaonline)) )
+					__util$add_time(&now, &ts, &deltaonline);
+				else if ( 0 < __util$cmp_time(&now, &deltaonline) )
+					{
+					$LOG(STS$K_INFO, "IP: %s is still ONLINE, RTT %d nsecs", inet_ntop(AF_INET, &g_client_sk.sin_addr, buf, sizeof(buf)),
+						g_rtt.tv_nsec);
+
+					__util$add_time(&now, &ts, &deltaonline);
+					}
+				}
+
+
+
 			}
 
 
@@ -1862,6 +1914,10 @@ char	buf[1024];
 		$IFTRACE(g_trace, "TUN RD: %llu packets, %llu octets, WR: %llu packets, %llu octets", g_stat.ptunrd, g_stat.btunrd, g_stat.ptunwr, g_stat.btunwr);
 		$IFTRACE(g_trace, "UDP RD: %llu packets, %llu octets, WR: %llu packets, %llu octets", g_stat.ptunrd, g_stat.btunrd, g_stat.ptunwr, g_stat.btunwr);
 		}
+
+	set_tun_state(0);		/* Down the tunX */
+	exec_script(&g_linkdown);	/* Switch /dev/tunX DOWN */
+	stat_write();			/* Write session statistic record */
 
 	/* Get out !*/
 	$LOG(STS$K_INFO, "Exit with exit_flag=%d!", g_exit_flag);

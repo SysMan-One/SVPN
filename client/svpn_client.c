@@ -74,6 +74,8 @@
 **
 **	 9-OCT-2019	RRL	Added handling of the TRACE option from server.
 **
+**	10-OCT-2019	RRL	Improved diagnostic output.
+**
 **--
 */
 
@@ -124,7 +126,7 @@
 #include	<fcntl.h>
 #include	<poll.h>
 #include	<sys/ioctl.h>
-#include	<net/if.h>
+//#include	<net/if.h>
 #include	<linux/if.h>
 #include	<linux/if_tun.h>
 
@@ -954,7 +956,8 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
 				NULL /* End-of-arguments marger !*/)) )
 		return	$LOG(STS$K_ERROR, "[%d]Hash checking error", g_udp_sd);
 
-	tlv_dump(pdu->data, buflen - SVPN$SZ_PDUHDR);
+	if ( g_trace )
+		tlv_dump(pdu->data, buflen - SVPN$SZ_PDUHDR);
 
 	/* Extract attributes from ACCEPT packet */
 	len = ASC$K_SZ;
@@ -997,7 +1000,7 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
 	tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_TOTAL, &v_type, &g_timers_set.t_max.tv_sec, &len);
 
 	len = sizeof(int);
-	tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_TOTAL, &v_type, &g_trace, &len);
+	tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_TRACE, &v_type, &g_trace, &len);
 
 	/* Display session parameters ... */
 	$LOG(STS$K_INFO, "Session parameters  :");
@@ -1046,6 +1049,8 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
 	len = sizeof(seq);
 	if ( !(1 & (tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_SEQ, &v_type, &seq, &len))) )
 		$LOG(STS$K_WARN, "[%d]No attribute %#x", g_udp_sd, SVPN$K_TAG_SEQ);
+
+	$IFTRACE(g_trace, "[#%d]Received PING #%#x", g_udp_sd, seq);
 
 	/* Do nothign with request - just sent it back as PONG request ... */
 	pdu->req = SVPN$K_REQ_PONG;
@@ -1193,7 +1198,7 @@ struct	sockaddr_in rsock = {0};
 			/* Is it's control packet begined with the magic prefix  ? */
 			if ( pdu->magic64 == *magic64 )
 				{
-				$LOG(STS$K_INFO, "Got control packet, req=%d, %d octets", pdu->req, rc);
+				$IFTRACE(g_trace, "Got control packet, req=%d, %d octets", pdu->req, rc);
 
 				switch ( pdu->req )
 					{
