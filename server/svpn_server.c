@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNSRV"
-#define	__IDENT__	"X.00-08"
-#define	__REV__		"0.0.08"
+#define	__IDENT__	"X.00-09"
+#define	__REV__		"0.0.09"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -76,7 +76,7 @@
 **	10-OCT-2019	RRL	Reduced diagnostic messages;
 **				added /DELTAONLINE=<seconds>
 **
-**	11-OCT-2019	RRL	X.00-08 : Added ping/pong sequences checking;
+**	11-OCT-2019	RRL	X.00-09 : Added ping/pong sequences checking;
 **				added backlog of IP address
 **
 **--
@@ -248,7 +248,7 @@ ASC	g_tun = {$ASCINI("tunX:")},	/* OS specific TUN device name		*/
 	g_keepalive = {$ASCINI("3, 3")},
 	g_climsg = {0}, g_linkup = {0}, g_linkdown = {0},
 	g_fstat = {0},
-	g_backlog = {0};
+	g_ipbacklog = {0};
 
 
 
@@ -325,11 +325,12 @@ const OPTS optstbl [] =		/* Configuration options		*/
 	{$ASCINI("MSS"),	&g_mss,	0,		OPTS$K_INT},
 	{$ASCINI("deltaonline"),&g_deltaonline,	0,	OPTS$K_INT},
 	{$ASCINI("stat"),	&g_fstat,ASC$K_SZ,	OPTS$K_STR},
-	{$ASCINI("backlog"),	&g_backlog,ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("ipbacklog"),	&g_ipbacklog,ASC$K_SZ,	OPTS$K_STR},
 
 	OPTS_NULL
 };
 
+const mode_t f_mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
 
 const char	help [] = { "Usage:\n" \
 		"$ %s [<options_list>]\n\n" \
@@ -341,6 +342,66 @@ const char	help [] = { "Usage:\n" \
 		"\t/LINKDOWN=<file>  script to be executed on tunnel down\n" \
 		"\t/AUTH=<user:pass> username and password pair\n" \
 		"\n\tExample of usage:\n\t $ %s -config=svpn_server.conf /trace\n\n" };
+
+
+
+/*
+ *  DESCRIPTION: Read old content of the IP Backlog file, add new entry at begin of file,
+ *	write new content to file.
+ *
+ *  INPUT:
+ *	ip:	IP address to be added
+ *
+ *  IMPLICITE INPUT:
+ *	g_backlog
+ *	g_lenbacklog
+ *
+ *  OUTPUT:
+ *	NONE
+ *
+ *  RETURN
+ *	condition code
+ *
+ */
+int	backlog_update	(
+		struct	in_addr *ip
+			)
+{
+int	fd = -1, status;
+struct in_addr iparr [SVPN$SZ_MAXIPBLOG] = {0};
+
+
+	if ( !$ASCLEN(&g_ipbacklog) )
+		return	STS$K_SUCCESS;
+
+
+	if ( 0 > (fd = open($ASCPTR(&g_ipbacklog), O_RDWR | O_CREAT, f_mode)) )
+		return	$LOG(STS$K_ERROR, "IP Backlog file open(%s), errno=%d", $ASCPTR(&g_ipbacklog), errno);
+
+
+	if ( 0 > (status = read(fd, iparr, sizeof(iparr))) )
+		status = $LOG(STS$K_ERROR, "IP Backlog file read(%s), errno=%d", $ASCPTR(&g_ipbacklog), errno);
+	else	{
+		/* Set file pointer at begin of the backlog file */
+		lseek(fd, SEEK_SET, 0);
+
+		/* Add new entry at top of array */
+		memmove(&iparr[1], &iparr[0], (g_lenbacklog - 1) * sizeof(iparr[0]));
+		iparr[0] = *ip;
+
+		/* Zeroing rest of array */
+		memset(&iparr[g_lenbacklog], 0, (SVPN$SZ_MAXIPBLOG - g_lenbacklog) * sizeof(iparr[0]));
+
+		/* Write IPs array back to the file */
+		if ( 0 > (status = write (fd, iparr, sizeof(iparr))) )
+			status = $LOG(STS$K_ERROR, "IP Backlog file write(%s), errno=%d", $ASCPTR(&g_ipbacklog), errno);
+		else	status = STS$K_SUCCESS;
+		}
+
+	close(fd);
+
+	return	status;
+}
 
 
 
@@ -381,7 +442,7 @@ unsigned	lmask = 0xFFFFFFFFUL;
 static	int	config_process	(void)
 {
 int	status = STS$K_SUCCESS, bits;
-char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64];
+char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64], fspec[255];
 
 	/* /TIMERS*/
 	$ASCLEN(&g_timers) = __util$uncomment ($ASCPTR(&g_timers), $ASCLEN(&g_timers), '!');
@@ -408,6 +469,16 @@ char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64];
 			}
 		}
 
+	if ( $ASCLEN(&g_ipbacklog) )
+		{
+		sscanf($ASCPTR(&g_ipbacklog), "%[^,\n],%[^\n]" , fspec, mask);
+		__util$str2asc (fspec, &g_ipbacklog);
+		g_lenbacklog = atoi(mask);
+
+		$IFTRACE(g_trace, "IPBACKLOG=%.*s, LENIPBACKLOG=%d", $ASC(&g_ipbacklog), g_lenbacklog);
+		}
+
+
 	sscanf($ASCPTR(&g_network), "%[^/\n]/%[^\n]" , ia, mask);
 	if ( !inet_pton(AF_INET, ia, &g_ia_network) )
 		return	$LOG(STS$K_ERROR, "Error converting IA=%s from %.*s", ia, $ASCPTR(&g_network));
@@ -431,7 +502,6 @@ char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64];
 	return	STS$K_SUCCESS;
 }
 
-const	mode_t f_mode =  0777; //S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
 
 int	stat_write	(void)
 {
@@ -1818,6 +1888,8 @@ struct timespec deltaonline = {0, 0}, now;
 
 			exec_script(&g_linkup);
 
+			backlog_update (&g_client_sk.sin_addr);
+
 			g_state = SVPN$K_STATETUN;
 			$LOG(STS$K_INFO, "IP: %s is ONLINE", inet_ntop(AF_INET, &g_client_sk.sin_addr, buf, sizeof(buf)));
 
@@ -1839,7 +1911,6 @@ struct timespec deltaonline = {0, 0}, now;
 			/* Write session statistic record */
 			stat_write();
 
-
 			g_state = SVPN$K_STATECTL;
 			$LOG(STS$K_INFO, "IP: %s is OFFLINE", inet_ntop(AF_INET, &g_client_sk.sin_addr, buf, sizeof(buf)));
 
@@ -1855,7 +1926,7 @@ struct timespec deltaonline = {0, 0}, now;
 				{
 				if ( (g_outseq - g_inpseq) > g_timers_set.retry )
 					{
-					$LOG(STS$K_ERROR, "Heartbit lost detected (PING #%d - PONG #%d)", g_outseq, g_inpseq);
+					$LOG(STS$K_ERROR, "Heartbeat lost detected (PING #%d - PONG #%d)", g_outseq, g_inpseq);
 					g_state = SVPN$K_STATEOFF;
 					continue;
 					}
@@ -1864,7 +1935,7 @@ struct timespec deltaonline = {0, 0}, now;
 					do_ping(g_udp_sd, &g_client_sk);
 
 					if ( (g_outseq - g_inpseq) > 1 )
-						$LOG(STS$K_WARN, "Heartbit lost detected (#%d/#%d)", (g_outseq - g_inpseq) - 1, g_timers_set.retry);
+						$LOG(STS$K_WARN, "Heartbeat lost detected (#%d/#%d)", (g_outseq - g_inpseq) - 1, g_timers_set.retry);
 					}
 				}
 			else	{

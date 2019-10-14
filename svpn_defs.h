@@ -45,6 +45,9 @@ extern "C" {
 #define	SVPN$SZ_PASS	32
 #define	SVPN$K_DEFPORT	1394	/* A default port sVPN			*/
 #define	SVPN$SZ_SALT	32
+#define	SVPN$SZ_MAXIPBLOG	32		/* A maximum entries in the IP Backlog file	*/
+
+
 
 enum	{
 	SVPN$K_PROTO_V1 = 1	/* A current version of the handshake protocol	*/
