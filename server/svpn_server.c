@@ -513,6 +513,12 @@ int	fd = -1, iovlen = sizeof(tmnow) + sizeof(g_stat);
 	if ( !$ASCLEN(&g_fstat) )
 		return	STS$K_SUCCESS;
 
+	/* Generate a final file specification by adding yyyy and mm at end of file specification from configuration option:
+	 * e.g. :
+	 *	./tmp/starlet-zilla/tun135.stat
+	 * -->
+	 *	./tmp/starlet-zilla/tun135.stat-2019-01
+	 */
 	__util$timbuf(NULL, &tmnow);
 	sprintf(fname, "%.*s-%04d-%02d", $ASC(&g_fstat), tmnow.tm_year, tmnow.tm_mon);
 
@@ -520,11 +526,11 @@ int	fd = -1, iovlen = sizeof(tmnow) + sizeof(g_stat);
 		return	$LOG(STS$K_ERROR, "open(%s)->%d, errno=%d", fname, fd, errno);
 
 
+	/* Write record: <timespec> <stat vector> */
 	ssize_t writev(int fd, const struct iovec *iov, int iovcnt);
 
 	if ( iovlen  != writev(fd, iov, $ARRSZ(iov)) )
 		return	$LOG(STS$K_ERROR, "Statistic write error, writev(%s, %d octets), errno=%d", fname, iovlen, errno);
-
 
 	close(fd);
 

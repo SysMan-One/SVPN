@@ -4,19 +4,22 @@ CONFIG -= app_bundle
 CONFIG -= qt
 CONFIG	+= -static
 
-SOURCES += \
-	../utility_routines.c \
-	../sha1.c \
-	svpn_client.c \
-    ../svpn_common.c
-
 HEADERS += \
 	../svpn_defs.h
+
+SOURCES += \
+	../utility_routines.c \
+	../svpn_common.c \
+	svpn_util.c \
+
 
 
 INCLUDEPATH	+= ..\
 
-LIBS	+= -static -pthread -lrt
+LIBS	+= -static
+# -pthread -lrt
+
+
 
 
 if (linux-aarch64-g++):{
@@ -57,12 +60,13 @@ if (linux-g++-64 | linux-g++):{
 CONFIG (debug, debug|release) {
 	DEFINES	+= _DEBUG=1 __TRACE__=1
 	CONFIG	+= -static
-	#LIBS	+= -static -static-libgcc
+	LIBS	+= -static -static-libgcc
 
 }
 else {
 	CONFIG	+= warn_off
 	DEFINES	+= _DEBUG=1 __TRACE__=1
 	CONFIG	+= -static
-	#LIBS	+= -static -static-libgcc
+	LIBS	+= -static -static-libgcc
 }
+

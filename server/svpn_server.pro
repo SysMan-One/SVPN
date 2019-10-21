@@ -10,7 +10,7 @@ HEADERS += \
 SOURCES += \
         ../utility_routines.c \
         ../sha1.c \
-        ../svpn_utils.c \
+        ../svpn_common.c \
         svpn_server.c \
 
 
