@@ -513,7 +513,7 @@ int	fd = -1, iovlen = sizeof(tmnow) + sizeof(g_stat);
 	if ( !$ASCLEN(&g_fstat) )
 		return	STS$K_SUCCESS;
 
-	/* Generate a final file specification by adding yyyy and mm at end of file specification from configuration option:
+	/* Generate a final file specification by adding year and month at end of file specification from configuration option:
 	 * e.g. :
 	 *	./tmp/starlet-zilla/tun135.stat
 	 * -->
@@ -527,8 +527,6 @@ int	fd = -1, iovlen = sizeof(tmnow) + sizeof(g_stat);
 
 
 	/* Write record: <timespec> <stat vector> */
-	ssize_t writev(int fd, const struct iovec *iov, int iovcnt);
-
 	if ( iovlen  != writev(fd, iov, $ARRSZ(iov)) )
 		return	$LOG(STS$K_ERROR, "Statistic write error, writev(%s, %d octets), errno=%d", fname, iovlen, errno);
 

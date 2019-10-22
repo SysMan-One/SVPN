@@ -42,6 +42,7 @@
 #include	<time.h>
 #include	<inttypes.h>
 #include	<signal.h>
+#include	<libgen.h>
 
 #include	"sha1.h"
 
@@ -171,7 +172,7 @@ ASC	g_confspec = {0},
 
 typedef struct	__svpn_stat
 	{
-	struct timespec ts;
+	struct	tm	ts;
 	unsigned long long
 		btunrd,			/* Octets counters	*/
 		btunwr,
@@ -181,7 +182,6 @@ typedef struct	__svpn_stat
 		ptunwr,
 		pnetrd,
 		pnetwr;
-
 } SVPN_STAT;
 
 
@@ -261,7 +261,7 @@ unsigned	lmask = 0xFFFFFFFFUL;
 }
 
 
-static	int	config_process	(int argc, char *argv)
+static	int	config_process	(int argc, char **argv)
 {
 int	status = STS$K_SUCCESS, bits;
 char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64], fspec[255];
@@ -273,9 +273,10 @@ char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64], fspec[255];
 		$IFTRACE(g_trace, "IPBACKLOG=%.*s", $ASC(&g_ipbacklog));
 		}
 
+	$IFTRACE(g_trace, "%s", cp = argv[0]);
 
-	if ( !$ASCLEN(&g_fstat) || !(cp = base($ASCPTR(&g_fstat))) )
-		cp = base($ASCPTR(argv[0]));
+	if ( !$ASCLEN(&g_fstat) || !(cp = dirname($ASCPTR(&g_fstat))) )
+		cp = dirname(argv[0]);
 
 	__util$str2asc (cp, &g_dstat);
 
@@ -358,6 +359,50 @@ char	fspec[NAME_MAX];
 }
 
 
+
+/*
+ * DESCRIPTION: Format given counter to <units> with appropriate prefix, like:
+ *	1024000 -> 100 K<units
+ *
+ * INPUT:
+ *	count:	a value to be converted
+ *	unit:	a unit of measurement
+ *
+ * OUTPUT:
+ *	out:	a buffer to accept result string
+ *	outsz:	a size of buffer
+ *
+ * RETURN:
+ *	length of the formated string
+ */
+const char	unit_octets [] = "b",
+		unit_packets [] = "pkts";
+
+static inline int	__fao_traffic	(
+		unsigned long long	count,
+			char		*out,
+			int		outsz,
+			char		*unit
+				)
+{
+int	outlen = 0;
+const unsigned long long kilo = 1024ULL;
+double	fcount = count;
+
+
+	if ( !(count/kilo) )
+		outlen = snprintf(out, outsz, "%4u %s", (unsigned) count, unit);
+	else if ( !(count/(kilo*kilo)) )
+		outlen = snprintf(out, outsz, "%4.2f K%s", fcount/kilo, unit);
+	else if ( !(count/(kilo*kilo*kilo)) )
+		outlen = snprintf(out, outsz, "%4.2f M%s",  fcount/(kilo*kilo), unit);
+	else if ( !(count/(kilo*kilo*kilo*kilo)) )
+		outlen = snprintf(out, outsz, "%4.2f G%s",  fcount/(kilo*kilo*kilo), unit);
+
+	return	outlen;
+}
+
+
 /*
  * DESCRIPTION: Display statistic on the screen depending on the option 'what'.
  *
@@ -371,9 +416,11 @@ char	fspec[NAME_MAX];
  *	NONE
  */
 typedef struct __stat_vec__ {			/* Structure to keep a live statistic		*/
-	double	bwrx, bwtx;
+	double	bwbnetrd, bwbnetwr, bwbtunrd, bwbtunwr,
+		bwpnetrd, bwpnetwr, bwptunrd, bwptunwr;
 	struct timespec	rtt;			/* A round trip time of the control channel, msec*/
 } STAT_VEC;
+
 
 int	stat_show	(char *what)
 {
@@ -381,14 +428,11 @@ int	fd = -1, hh, dd, mm, status = 0;
 char	sname[MAXNAMLEN] = {0}, buf1[128] = {0}, buf2[128] = {0}, buf3[128] = {0}, buf4[128] = {0};
 SVPN_STAT strec = {0};
 STAT_VEC stvec = {0};
-struct	tm	now;
 unsigned long long	nsnd, nrcv, tsnd, trcv;
+struct tm now;
 
 	/* Sanity check */
 	what = what ? what : "l";
-
-	__util$timbuf (NULL, &now);
-
 
 	if ( *what == 'i' )		/* Dump IP Backlog file	*/
 		{
@@ -408,8 +452,8 @@ unsigned long long	nsnd, nrcv, tsnd, trcv;
 
 		while ( 0 < (status = read(fd, &stvec, sizeof(STAT_VEC))) )
 			{
-			__util$fao_traffic (stvec.bwrx, buf1, sizeof(buf1));
-			__util$fao_traffic (stvec.bwtx, buf2, sizeof(buf2));
+			__fao_traffic (stvec.bwbnetrd, buf1, sizeof(buf1), unit_octets);
+			__fao_traffic (stvec.bwbnetwr, buf2, sizeof(buf2), unit_octets);
 
 			$LOG(STS$K_INFO, "%.*s   BW Rx: %s/s   BW Tx: %s/s, RTT: %02d.%d",
 				$ASC(&g_tun), buf1, buf2, stvec.rtt.tv_sec, stvec.rtt.tv_nsec/(1000*1000) );
@@ -421,47 +465,50 @@ unsigned long long	nsnd, nrcv, tsnd, trcv;
 
 
 	/* Prepare file mask to matching */
-	snprintf(sname, sizeof(sname) - 1, "*_%%%%-%d.stat", now.tm_year);
+	__util$timbuf (NULL, &now);
+	snprintf(sname, sizeof(sname) - 1, "%.*s-%04d-%%", $ASC(&g_fstat), now.tm_year);
 
 
 	switch (*what)
 		{
 		case	'h':	/* from begin of day	*/
+
+
 			$LOG(STS$K_INFO, " ---- Hourly stat for %.*s ----", $ASC(&g_tun));
 
 			for ( hh = nsnd = nrcv = tsnd = trcv = 0;  1 & (status = stat_read_rec(sname, &strec)); )
 				{
-				if ( (now.tm_mday != strec.day) || (now.tm_mon != strec.month) )
+				if ( (now.tm_mday != strec.ts.tm_mday) || (now.tm_mon != strec.ts.tm_mon) )
 					continue;
 
-				if ( hh != strec.hh )
+				if ( hh != strec.ts.tm_hour )
 					{
-					__util$fao_traffic (nrcv, buf1, sizeof(buf1));
-					__util$fao_traffic (nsnd, buf2, sizeof(buf2));
-					__util$fao_traffic (trcv, buf3, sizeof(buf3));
-					__util$fao_traffic (tsnd, buf4, sizeof(buf4));
+					__fao_traffic (nrcv, buf1, sizeof(buf1), unit_octets);
+					__fao_traffic (nsnd, buf2, sizeof(buf2), unit_octets);
+					__fao_traffic (trcv, buf3, sizeof(buf3), unit_octets);
+					__fao_traffic (tsnd, buf4, sizeof(buf4), unit_octets);
 
 					$LOG(STS$K_INFO, "%02d:00  --  NET Rx: %s   Tx: %s, TAP Rx: %s   Tx: %s", hh, buf1, buf2, buf3, buf4);
 
 					/* Switch to next hour, reset local counters */
-					hh = strec.hh;
+					hh = strec.ts.tm_hour;
 					nsnd = nrcv = tsnd = trcv = 0;
 
 					continue;
 					}
 
-				nsnd	+= strec.nsnd;
-				nrcv	+= strec.nrcv;
-				tsnd	+= strec.tsnd;
-				trcv	+= strec.trcv;
+				nsnd	+= strec.bnetwr;
+				nrcv	+= strec.bnetrd;
+				tsnd	+= strec.btunwr;
+				trcv	+= strec.btunrd;
 				}
 
 			if ( nsnd  || nrcv )
 				{
-				__util$fao_traffic (nrcv, buf1, sizeof(buf1));
-				__util$fao_traffic (nsnd, buf2, sizeof(buf2));
-				__util$fao_traffic (trcv, buf3, sizeof(buf3));
-				__util$fao_traffic (tsnd, buf4, sizeof(buf4));
+				__fao_traffic (nrcv, buf1, sizeof(buf1), unit_octets);
+				__fao_traffic (nsnd, buf2, sizeof(buf2), unit_octets);
+				__fao_traffic (trcv, buf3, sizeof(buf3), unit_octets);
+				__fao_traffic (tsnd, buf4, sizeof(buf4), unit_octets);
 
 				$LOG(STS$K_INFO, "%02d:00  --  NET Rx: %s   Tx: %s, TAP Rx: %s   Tx: %s", hh, buf1, buf2, buf3, buf4);
 				}
@@ -473,39 +520,40 @@ unsigned long long	nsnd, nrcv, tsnd, trcv;
 
 			for ( dd = 1, nsnd = nrcv = tsnd = trcv = 0; 1 & (status = stat_read_rec(sname, &strec)); )
 				{
-				if ( (now.tm_mon != strec.month) )
+				if ( (now.tm_mon != strec.ts.tm_mon) )
 					continue;
 
-				if ( dd != strec.day )
+				if ( dd != strec.ts.tm_mday )
 					{
-					__util$fao_traffic (nrcv, buf1, sizeof(buf1));
-					__util$fao_traffic (nsnd, buf2, sizeof(buf2));
-					__util$fao_traffic (trcv, buf3, sizeof(buf3));
-					__util$fao_traffic (tsnd, buf4, sizeof(buf4));
+					__fao_traffic (nrcv, buf1, sizeof(buf1), unit_octets);
+					__fao_traffic (nsnd, buf2, sizeof(buf2), unit_octets);
+					__fao_traffic (trcv, buf3, sizeof(buf3), unit_octets);
+					__fao_traffic (tsnd, buf4, sizeof(buf4), unit_octets);
 
-					$LOG(STS$K_INFO, "%02d-%02d  --  NET Rx: %s   Tx: %s, TAP Rx: %s   Tx: %s", dd, strec.month, buf1, buf2, buf3, buf4);
+					$LOG(STS$K_INFO, "%02d-%02d  --  NET Rx: %s   Tx: %s, TAP Rx: %s   Tx: %s", dd, strec.ts.tm_mon, buf1, buf2, buf3, buf4);
 
 					/* Switch to next day, reset local counters */
-					dd = strec.day;
+					dd = strec.ts.tm_mday;
 					nsnd = nrcv = tsnd = trcv = 0;
 
 					continue;
 					}
 
-				nsnd	+= strec.nsnd;
-				nrcv	+= strec.nrcv;
-				tsnd	+= strec.tsnd;
-				trcv	+= strec.trcv;
+				nsnd	+= strec.bnetwr;
+				nrcv	+= strec.bnetrd;
+				tsnd	+= strec.btunwr;
+				trcv	+= strec.btunrd;
+
 				}
 
 			if ( nsnd  || nrcv )
 				{
-				__util$fao_traffic (nrcv, buf1, sizeof(buf1));
-				__util$fao_traffic (nsnd, buf2, sizeof(buf2));
-				__util$fao_traffic (trcv, buf3, sizeof(buf3));
-				__util$fao_traffic (tsnd, buf4, sizeof(buf4));
+				__fao_traffic (nrcv, buf1, sizeof(buf1), unit_octets);
+				__fao_traffic (nsnd, buf2, sizeof(buf2), unit_octets);
+				__fao_traffic (trcv, buf3, sizeof(buf3), unit_octets);
+				__fao_traffic (tsnd, buf4, sizeof(buf4), unit_octets);
 
-				$LOG(STS$K_INFO, "%02d-%02d  --  NET Rx: %s   Tx: %s, TAP Rx: %s   Tx: %s", dd, strec.month, buf1, buf2, buf3, buf4);
+				$LOG(STS$K_INFO, "%02d-%02d  --  NET Rx: %s   Tx: %s, TAP Rx: %s   Tx: %s", dd, strec.ts.tm_mon, buf1, buf2, buf3, buf4);
 				}
 
 			break;
@@ -515,36 +563,35 @@ unsigned long long	nsnd, nrcv, tsnd, trcv;
 
 			for ( mm = 1, nsnd = nrcv = tsnd = trcv = 0; 1 & (status = stat_read_rec(sname, &strec)); )
 				{
-				if ( mm != strec.month )
+				if ( mm != strec.ts.tm_mon )
 					{
-					__util$fao_traffic (nrcv, buf1, sizeof(buf1));
-					__util$fao_traffic (nsnd, buf2, sizeof(buf2));
-					__util$fao_traffic (trcv, buf3, sizeof(buf3));
-					__util$fao_traffic (tsnd, buf4, sizeof(buf4));
+					__fao_traffic (nrcv, buf1, sizeof(buf1), unit_octets);
+					__fao_traffic (nsnd, buf2, sizeof(buf2), unit_octets);
+					__fao_traffic (trcv, buf3, sizeof(buf3), unit_octets);
+					__fao_traffic (tsnd, buf4, sizeof(buf4), unit_octets);
 
-					$LOG(STS$K_INFO, "%02d-%04d  --  NET Rx: %s   Tx: %s, TAP Rx: %s   Tx: %s", mm, strec.year, buf1, buf2, buf3, buf4);
+					$LOG(STS$K_INFO, "%02d-%04d  --  NET Rx: %s   Tx: %s, TAP Rx: %s   Tx: %s", mm, strec.ts.tm_year, buf1, buf2, buf3, buf4);
 
 					/* Switch to next day, reset local counters */
-					mm = strec.month;
+					mm = strec.ts.tm_mon;
 					nsnd = nrcv = tsnd = trcv = 0;
 
 					continue;
 					}
-
-				nsnd	+= strec.nsnd;
-				nrcv	+= strec.nrcv;
-				tsnd	+= strec.tsnd;
-				trcv	+= strec.trcv;
+				nsnd	+= strec.bnetwr;
+				nrcv	+= strec.bnetrd;
+				tsnd	+= strec.btunwr;
+				trcv	+= strec.btunrd;
 				}
 
 			if ( nsnd  || nrcv )
 				{
-				__util$fao_traffic (nrcv, buf1, sizeof(buf1));
-				__util$fao_traffic (nsnd, buf2, sizeof(buf2));
-				__util$fao_traffic (trcv, buf3, sizeof(buf3));
-				__util$fao_traffic (tsnd, buf4, sizeof(buf4));
+				__fao_traffic (nrcv, buf1, sizeof(buf1), unit_octets);
+				__fao_traffic (nsnd, buf2, sizeof(buf2), unit_octets);
+				__fao_traffic (trcv, buf3, sizeof(buf3), unit_octets);
+				__fao_traffic (tsnd, buf4, sizeof(buf4), unit_octets);
 
-				$LOG(STS$K_INFO, "%02d-%04d  --  NET Rx: %s   Tx: %s, TAP Rx: %s   Tx: %s", mm, strec.year, buf1, buf2, buf3, buf4);
+				$LOG(STS$K_INFO, "%02d-%04d  --  NET Rx: %s   Tx: %s, TAP Rx: %s   Tx: %s", mm, strec.ts.tm_year, buf1, buf2, buf3, buf4);
 				}
 
 			break;
@@ -554,18 +601,18 @@ unsigned long long	nsnd, nrcv, tsnd, trcv;
 
 			for ( nsnd = nrcv = tsnd = trcv = 0; 1 & (status = stat_read_rec(sname, &strec)); )
 				{
-				nsnd	+= strec.nsnd;
-				nrcv	+= strec.nrcv;
-				tsnd	+= strec.tsnd;
-				trcv	+= strec.trcv;
+				nsnd	+= strec.bnetwr;
+				nrcv	+= strec.bnetrd;
+				tsnd	+= strec.btunwr;
+				trcv	+= strec.btunrd;
 				}
 
-			__util$fao_traffic (strec.nrcv, buf1, sizeof(buf1));
-			__util$fao_traffic (strec.nsnd, buf2, sizeof(buf2));
-			__util$fao_traffic (strec.trcv, buf3, sizeof(buf3));
-			__util$fao_traffic (strec.tsnd, buf4, sizeof(buf4));
+			__fao_traffic (strec.bnetrd, buf1, sizeof(buf1), unit_octets);
+			__fao_traffic (strec.bnetwr, buf2, sizeof(buf2), unit_octets);
+			__fao_traffic (strec.btunrd, buf3, sizeof(buf3), unit_octets);
+			__fao_traffic (strec.btunwr, buf4, sizeof(buf4), unit_octets);
 
-			$LOG(STS$K_INFO, " %04d  --  NET Rx: %s   Tx: %s, TAP Rx: %s   Tx: %s", strec.year, buf1, buf2, buf3, buf4);
+			$LOG(STS$K_INFO, " %04d  --  NET Rx: %s   Tx: %s, TAP Rx: %s   Tx: %s", strec.ts.tm_year, buf1, buf2, buf3, buf4);
 			break;
 
 		default:
