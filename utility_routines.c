@@ -429,7 +429,7 @@ OPTS	*optp, *optp2;
 
 		if ( !optp2 || !$ASCLEN(&optp2->name) )
 			{
-			$LOG(STS$K_WARN, "%s : %d : Skip unrecognized or unused option", fconf, i);
+			//$LOG(STS$K_WARN, "%s : %d : Skip unrecognized or unused option", fconf, i);
 			continue;
 			}
 

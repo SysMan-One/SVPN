@@ -22,7 +22,13 @@
 **
 **			/CONFIG=<configuration_file>
 **			/TRACE
-**
+**			/SHOW[STAT]=<statkwd>
+**				statkwd:	L[ive]
+**						I[PBacklog]
+**						Y[year]
+**						M[onthly]
+**						D[aily]
+**						H[ourly]
 **
 **
 **  AUTHORS: Ruslan R. (The BadAss SysMan) Laishev
@@ -162,7 +168,8 @@ static const	ASC	__ident__ = {$ASCINI(__IDENT__ "/"  __ARCH__NAME__   "(built at
 
 /* Global configuration parameters */
 static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
-	g_trace = 0;			/* A flag to produce extensible logging	*/
+	g_trace = 0,			/* A flag to produce extensible logging	*/
+	g_lenbacklog = 5;
 
 ASC	g_confspec = {0},
 	g_fstat = {0}, g_dstat = {0},
@@ -240,42 +247,34 @@ char	ipbuf[32];
 	if ( !(1 & status) )
 		return;
 
-	for ( i = 1; i < SVPN$SZ_MAXIPBLOG; i++)
+	for ( i = 1; i <= g_lenbacklog; i++)
 		{
 		inet_ntop(AF_INET, &iparr[i], ipbuf, sizeof(ipbuf));
-		$LOG(STS$K_INFO, "#%d : IP-%s", i, ipbuf);
+		$LOG(STS$K_INFO, "#%02d : IP-%s", i, ipbuf);
 		}
 
 	return	status;
 }
 
 
-static inline void	__bits2inaddr	(
-			int	bits,
-			void	*mask
-				)
-{
-unsigned	lmask = 0xFFFFFFFFUL;
-
-	*((unsigned *) mask) = htonl((lmask << (32 - bits)));
-}
-
 
 static	int	config_process	(int argc, char **argv)
 {
 int	status = STS$K_SUCCESS, bits;
 char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64], fspec[255];
+ASC	l_fstat = g_fstat;
 
 	if ( $ASCLEN(&g_ipbacklog) )
 		{
 		sscanf($ASCPTR(&g_ipbacklog), "%[^,\n],%[^\n]" , fspec, mask);
 		__util$str2asc (fspec, &g_ipbacklog);
-		$IFTRACE(g_trace, "IPBACKLOG=%.*s", $ASC(&g_ipbacklog));
+
+		g_lenbacklog = atoi(mask);
+
+		$IFTRACE(g_trace, "IPBACKLOG=%.*s, LENIPBACKLOG=%d", $ASC(&g_ipbacklog), g_lenbacklog);
 		}
 
-	$IFTRACE(g_trace, "%s", cp = argv[0]);
-
-	if ( !$ASCLEN(&g_fstat) || !(cp = dirname($ASCPTR(&g_fstat))) )
+	if ( !$ASCLEN(&l_fstat) || !(cp = dirname($ASCPTR(&l_fstat))) )
 		cp = dirname(argv[0]);
 
 	__util$str2asc (cp, &g_dstat);
@@ -307,7 +306,7 @@ int	stat_read_rec	(
 static	status, fd = -1;
 static	DIR *dir = NULL;
 struct  dirent *dent = NULL;
-char	fspec[NAME_MAX];
+static char	fspec[NAME_MAX];
 
 	/* At first call we need to open directory to be scanned for .stat files */
 	if ( !dir )
@@ -322,6 +321,8 @@ char	fspec[NAME_MAX];
 		{
 		while ( dent = readdir(dir) )
 			{
+			//$IFTRACE(g_trace, "Matching: '%s' against mask '%s'...", dent->d_name, fmask);
+
 			/* Check against pattern ... */
 			if ( 1 & __util$pattern_match(dent->d_name, fmask) )
 				{
@@ -329,7 +330,10 @@ char	fspec[NAME_MAX];
 				sprintf(fspec, "%s/%s", $ASCPTR(&g_dstat), dent->d_name);
 
 				if ( 0 < (fd = open(fspec, O_RDONLY, 0)) )
+					{
+					//$IFTRACE(g_trace, "Process file: %s ...", fspec);
 					break; /* Success! Out from loop */
+					}
 
 				$LOG(STS$K_FATAL, "Error open '%s' - skip, errno=%d", fspec, errno);
 				}
@@ -340,19 +344,27 @@ char	fspec[NAME_MAX];
 			closedir(dir);
 			fd = -1;
 
-			return	$LOG(STS$K_WARN, "No more files");
+			return	STS$K_WARN; //$LOG(STS$K_WARN, "No more files");
 			}
 		}
 
 	/* Check current status */
 	if ( fd < 0 )
-		return	$LOG(STS$K_WARN, "No more files");
+		return	STS$K_WARN; //$LOG(STS$K_WARN, "No more files");
 
 	if ( !(status = read (fd, strec, sizeof(SVPN_STAT))) )
+		{
 		/* 0 - EOF, close current file, set fd to -1 */
+		close(fd );
+		fd = -1;
+
 		return	stat_read_rec (fmask, strec);
+		}
 	else if ( status < 0 )
 		return	$LOG(STS$K_FATAL, "Error reading file '%s', errno=%d", fspec, errno);
+
+
+	//$IFTRACE(g_trace, "Read %d octets from '%s', HH:%02d", status, fspec, strec->ts.tm_hour);
 
 	/* Success! */
 	return	STS$K_SUCCESS;
@@ -425,7 +437,9 @@ typedef struct __stat_vec__ {			/* Structure to keep a live statistic		*/
 int	stat_show	(char *what)
 {
 int	fd = -1, hh, dd, mm, status = 0;
-char	sname[MAXNAMLEN] = {0}, buf1[128] = {0}, buf2[128] = {0}, buf3[128] = {0}, buf4[128] = {0};
+char	sname[MAXNAMLEN] = {0}, buf1[128] = {0}, buf2[128] = {0}, buf3[128] = {0}, buf4[128] = {0},
+	*cp;
+
 SVPN_STAT strec = {0};
 STAT_VEC stvec = {0};
 unsigned long long	nsnd, nrcv, tsnd, trcv;
@@ -466,7 +480,9 @@ struct tm now;
 
 	/* Prepare file mask to matching */
 	__util$timbuf (NULL, &now);
-	snprintf(sname, sizeof(sname) - 1, "%.*s-%04d-%%", $ASC(&g_fstat), now.tm_year);
+	cp = basename( $ASCPTR(&g_fstat) );
+
+	snprintf(sname, sizeof(sname) - 1, "%s-%04d-%%%%", cp ? cp : "*", now.tm_year);
 
 
 	switch (*what)
@@ -492,7 +508,10 @@ struct tm now;
 
 					/* Switch to next hour, reset local counters */
 					hh = strec.ts.tm_hour;
-					nsnd = nrcv = tsnd = trcv = 0;
+					nsnd	= strec.bnetwr;
+					nrcv	= strec.bnetrd;
+					tsnd	= strec.btunwr;
+					trcv	= strec.btunrd;
 
 					continue;
 					}
@@ -534,7 +553,10 @@ struct tm now;
 
 					/* Switch to next day, reset local counters */
 					dd = strec.ts.tm_mday;
-					nsnd = nrcv = tsnd = trcv = 0;
+					nsnd	= strec.bnetwr;
+					nrcv	= strec.bnetrd;
+					tsnd	= strec.btunwr;
+					trcv	= strec.btunrd;
 
 					continue;
 					}
@@ -574,7 +596,10 @@ struct tm now;
 
 					/* Switch to next day, reset local counters */
 					mm = strec.ts.tm_mon;
-					nsnd = nrcv = tsnd = trcv = 0;
+					nsnd	= strec.bnetwr;
+					nrcv	= strec.bnetrd;
+					tsnd	= strec.btunwr;
+					trcv	= strec.btunrd;
 
 					continue;
 					}
@@ -628,25 +653,6 @@ struct tm now;
 
 
 /*
-**  DESCRIPTION: Compute time from timespec to milisecond - input for poll()
-**
-**  INPUT:
-**	src:	source time in timespec format
-**
-**  OUTPUT: NONE
-**
-**  RETURN:
-**	time in miliseconds
-**
-*/
-inline static int timespec2msec (
-		struct timespec	*src
-				)
-{
-	return (src->tv_sec  * 1024) + (src->tv_nsec / 1024);
-}
-
-/*
  *   DESCRIPTION:
  *
  *   INPUT:
@@ -678,9 +684,9 @@ struct timespec deltaonline = {0, 0}, now;
 	/* Additionaly parse and validate configuration options  */
 	config_process(argc, argv);
 
+	if ( $ASCLEN(&g_show) )
+		stat_show ( $ASCPTR(&g_show) );
 
-	/* Get out !*/
-	$LOG(STS$K_INFO, "Exit with exit_flag=%d!", g_exit_flag);
 
 	return	STS$K_SUCCESS;
 }
