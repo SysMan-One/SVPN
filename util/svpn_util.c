@@ -1,11 +1,12 @@
 #define	__MODULE__	"SVPUTL"
-#define	__IDENT__	"X.00-01"
-#define	__REV__		"0.0.01"
+#define	__IDENT__	"X.00-02"
+#define	__REV__		"0.0.02"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
 	#pragma	GCC diagnostic ignored	"-Wunused-variable"
 	#pragma	GCC diagnostic ignored	"-Wmissing-braces"
+	#pragma	GCC diagnostic ignored	"-Wdiscarded-qualifiers"
 #endif
 
 
@@ -35,6 +36,7 @@
 **
 **  MODIFICATION HISTORY:
 **
+**	24-OCT-2019	RRL	Implement SHOW=LIVE
 **
 **--
 */
@@ -439,13 +441,6 @@ double	fcount = count;
  * RETURN:
  *	NONE
  */
-typedef struct __stat_vec__ {			/* Structure to keep a live statistic		*/
-	double	bwbnetrd, bwbnetwr, bwbtunrd, bwbtunwr,
-		bwpnetrd, bwpnetwr, bwptunrd, bwptunwr;
-	struct timespec	rtt;			/* A round trip time of the control channel, msec*/
-} STAT_VEC;
-
-
 int	stat_show	(char *what)
 {
 int	fd = -1, hh, dd, mm, status = 0;
@@ -453,7 +448,7 @@ char	sname[MAXNAMLEN] = {0}, buf1[128] = {0}, buf2[128] = {0}, buf3[128] = {0}, 
 	*cp;
 
 SVPN_STAT strec = {0};
-STAT_VEC stvec = {0};
+SVPN_VSTAT vstat = {0};
 unsigned long long	nsnd, nrcv, tsnd, trcv;
 struct tm now;
 
@@ -469,20 +464,24 @@ struct tm now;
 	if ( *what == 'l' )		/* Live statistic	*/
 		{
 		/* FIFO channel to put statistic vector */
-		snprintf(sname, sizeof(sname) - 1, "/tmp/stun-%.*s", $ASC(&g_tun));
+		snprintf(sname, sizeof(sname) - 1, "/tmp/svpn-%.*s", $ASC(&g_tun));
 
 		if ( 0 > (fd = open(sname, O_RDONLY /* O_NONBLOCK*/ )) )
 			return	$LOG(STS$K_ERROR, "open(%s), errno=%d", sname, errno);
 
 		$LOG(STS$K_INFO, " ---- Live stat for %.*s----", $ASC(&g_tun));
 
-		while ( 0 < (status = read(fd, &stvec, sizeof(STAT_VEC))) )
+		while ( 0 < (status = read(fd, &vstat, sizeof(SVPN_VSTAT))) )
 			{
-			__fao_traffic (stvec.bwbnetrd, buf1, sizeof(buf1), unit_octets);
-			__fao_traffic (stvec.bwbnetwr, buf2, sizeof(buf2), unit_octets);
+			$DUMPHEX(&vstat, status);
+			__fao_traffic (vstat.bnetrd/vstat.delta.tv_sec, buf1, sizeof(buf1), unit_octets);
+			__fao_traffic (vstat.bnetwr/vstat.delta.tv_sec, buf2, sizeof(buf2), unit_octets);
 
-			$LOG(STS$K_INFO, "%.*s   BW Rx: %s/s   BW Tx: %s/s, RTT: %02d.%d",
-				$ASC(&g_tun), buf1, buf2, stvec.rtt.tv_sec, stvec.rtt.tv_nsec/(1000*1000) );
+			__fao_traffic (vstat.pnetrd/vstat.delta.tv_sec, buf3, sizeof(buf3), unit_packets);
+			__fao_traffic (vstat.pnetwr/vstat.delta.tv_sec, buf4, sizeof(buf3), unit_packets);
+
+			$LOG(STS$K_INFO, "%.*s   BW(Bps) Rx: %s/s Tx: %s/s, BW(pps) Rx: %s/s Tx: %s/s, RTT: %d nsecs",
+				$ASC(&g_tun), buf1, buf2, buf3, buf4, vstat.rtt.tv_nsec);
 			}
 
 		close (fd);
@@ -687,6 +686,7 @@ struct timespec deltaonline = {0, 0}, now;
 	if ( argc < 2 )
 		{
 		fprintf(stdout, help, argv[0], argv[0]);
+		fflush(stdout);
 		return	-EINVAL;
 		}
 

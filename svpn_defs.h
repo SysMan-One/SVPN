@@ -47,8 +47,6 @@ extern "C" {
 #define	SVPN$SZ_SALT	32
 #define	SVPN$SZ_MAXIPBLOG	32		/* A maximum entries in the IP Backlog file	*/
 
-
-
 enum	{
 	SVPN$K_PROTO_V1 = 1	/* A current version of the handshake protocol	*/
 };
@@ -110,6 +108,23 @@ enum	{			/* Signaling channel requests */
 #define	SVPN$SZ_MAGIC	8
 #define	SVPN$T_MAGIC	"StarLet"
 #define	SVPN$SZ_DIGEST	20	/* SHA1 size	*/
+
+
+
+
+typedef struct	__svpn_vstat__
+	{
+	struct timespec delta,
+			rtt;
+
+	unsigned long long
+		bnetrd,
+		bnetwr,
+		pnetrd,
+		pnetwr;
+
+} SVPN_VSTAT;
+
 
 typedef struct	__svpn_pdu
 	{

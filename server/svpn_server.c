@@ -6,6 +6,7 @@
 	#pragma GCC diagnostic ignored  "-Wparentheses"
 	#pragma	GCC diagnostic ignored	"-Wunused-variable"
 	#pragma	GCC diagnostic ignored	"-Wmissing-braces"
+	#pragma	GCC diagnostic ignored	"-Wdiscarded-qualifiers"
 #endif
 
 
@@ -248,7 +249,8 @@ ASC	g_tun = {$ASCINI("tunX:")},	/* OS specific TUN device name		*/
 	g_keepalive = {$ASCINI("3, 3")},
 	g_climsg = {0}, g_linkup = {0}, g_linkdown = {0},
 	g_fstat = {0},
-	g_ipbacklog = {0};
+	g_ipbacklog = {0},
+	g_fifo = {0};			/* FIFO spec to interchange by counters	*/
 
 
 
@@ -271,7 +273,7 @@ typedef	struct __svpn_timers__	{
 
 } SVPN_TIMERS;
 
-struct timespec	g_rtt;
+struct timespec	g_rtt = {.tv_sec = 1, .tv_nsec = 1};
 
 static	SVPN_TIMERS	g_timers_set = { {7, 0}, {120, 0}, {13, 0}, {600, 0}, 3};
 
@@ -284,7 +286,7 @@ static	pthread_cond_t	crea_cond = PTHREAD_COND_INITIALIZER;
 
 
 
-typedef struct	__svpn_stat
+typedef struct	__svpn_stat__
 	{
 	atomic_ullong
 		btunrd,
@@ -298,8 +300,12 @@ typedef struct	__svpn_stat
 		pnetrd,
 		pnetwr;
 
+	struct  timespec ts;
+
 } SVPN_STAT;
-SVPN_STAT	g_stat = {0}, g_stat_zero = {0};
+SVPN_STAT	g_stat_last = {0}, g_stat = {0}, g_stat_zero = {0};
+
+
 
 const OPTS optstbl [] =		/* Configuration options		*/
 {
@@ -499,6 +505,14 @@ char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64], fspec[255];
 
 	status = sscanf($ASCPTR(&g_keepalive), "%d , %d" , &g_timers_set.t_ping.tv_sec, &g_timers_set.retry);
 
+	/* FIFO channel to put statistic vector */
+	$ASCLEN(&g_fifo) = (unsigned char) snprintf($ASCPTR(&g_fifo), ASC$K_SZ, "/tmp/svpn-%.*s", $ASC(&g_tun));
+
+	if ( mkfifo($ASCPTR(&g_fifo), 0777) && (errno != EEXIST) )
+		$LOG(STS$K_ERROR, "mkfifo(%.*s), errno=%d", $ASC(&g_fifo), errno);
+	else	$LOG(STS$K_SUCCESS, "FIFO device '%.*s' has been created", $ASC(&g_fifo));
+
+
 	return	STS$K_SUCCESS;
 }
 
@@ -535,6 +549,43 @@ int	fd = -1, iovlen = sizeof(tmnow) + sizeof(g_stat);
 	return	STS$K_SUCCESS;
 }
 
+void	stat_update	(void)
+{
+int	fd = -1;
+SVPN_VSTAT vstat = {0};
+
+	if ( !$ASCLEN(&g_fifo) )
+		return;
+
+	/* Update stat vector with computed bandwidth counters,
+	 * it's not correct way to use atomic values but is acceptable at glance
+	*/
+	vstat.bnetrd = g_stat.bnetrd - g_stat_last.bnetrd;
+	vstat.bnetwr = g_stat.bnetwr - g_stat_last.bnetwr;
+
+	vstat.pnetrd = g_stat.pnetrd - g_stat_last.pnetrd;
+	vstat.pnetwr = g_stat.pnetwr - g_stat_last.pnetwr;
+
+	vstat.rtt = g_rtt;
+
+	__util$sub_time(&g_stat.ts, &g_stat_last.ts, &vstat.delta);
+	vstat.delta = vstat.delta.tv_sec ? vstat.delta : g_timers_set.t_ping;
+
+	/* Save current counters for future use */
+	g_stat_last = g_stat;
+
+	/* Open FIFO device, write stat vector record, close */
+	if ( 0 > (fd = open($ASCPTR(&g_fifo), O_WRONLY | O_NONBLOCK)) )
+		{
+		$IFTRACE(g_trace && (errno != ENXIO),  "open(%.*s), errno=%d", $ASC(&g_fifo), errno);
+		}
+	else if ( sizeof(SVPN_VSTAT) != write(fd, &vstat, sizeof(SVPN_VSTAT)) )
+		{
+		$IFTRACE(g_trace, "write(%.*s, %d octets), errno=%d", $ASC(&g_fifo), sizeof(vstat), errno);
+		}
+
+	close(fd);
+}
 
 /*
  * change TCP MSS option in SYN/SYN-ACK packets, if present
@@ -1884,7 +1935,7 @@ struct timespec deltaonline = {0, 0}, now;
 			{
 			/* Reset seession specific counters */
 			idle_count = 0;
-			g_stat = g_stat_zero;
+			g_stat_last = g_stat = g_stat_zero;
 			deltaonline.tv_sec = deltaonline.tv_nsec = 0;
 			g_outseq = g_inpseq = 0;
 			g_input_count = 0;
@@ -1988,6 +2039,9 @@ struct timespec deltaonline = {0, 0}, now;
 
 		$IFTRACE(g_trace, "TUN RD: %llu packets, %llu octets, WR: %llu packets, %llu octets", g_stat.ptunrd, g_stat.btunrd, g_stat.ptunwr, g_stat.btunwr);
 		$IFTRACE(g_trace, "UDP RD: %llu packets, %llu octets, WR: %llu packets, %llu octets", g_stat.ptunrd, g_stat.btunrd, g_stat.ptunwr, g_stat.btunwr);
+
+		/* Update state counters */
+		stat_update();
 		}
 
 	set_tun_state(0);		/* Down the tunX */

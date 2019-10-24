@@ -8,8 +8,8 @@ COPTS="-fPIC -I ../ -D_DEBUG=1 -D__TRACE__=1 -pthread -static"
 # -static-libgcc
 
 #COPTS="-I ../ -pthread -static"
-SRCS="svpn_client.c ../svpn_utils.c ../sha1.c ../utility_routines.c"
-EXE="svpn_client"
+SRCS="svpn_server.c ../svpn_common.c ../sha1.c ../utility_routines.c"
+EXE="svpn_server"
 
 build	()
 {
