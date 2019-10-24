@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPUTL"
-#define	__IDENT__	"X.00-00"
-#define	__REV__		"0.0.00"
+#define	__IDENT__	"X.00-01"
+#define	__REV__		"0.0.01"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -17,8 +17,6 @@
 **
 **  USAGE:
 **		$ ./SVPN_UTIL	[options]
-**
-**			-v, -?, -h, -o <file>, -d
 **
 **			/CONFIG=<configuration_file>
 **			/TRACE
@@ -205,6 +203,20 @@ const OPTS optstbl [] =		/* Configuration options		*/
 };
 
 
+const char	help [] = { "Usage:\n" \
+		"$ %s [<options_list>]\n\n" \
+		"\t/CONFIG=<file>    configuration options file path\n" \
+		"\t/TRACE            enable extensible diagnostic output\n" \
+		"\t/SHOW=<statkwd>   show statistic\n" \
+		"\t\tstatkwd:	L[ive]\n" \
+		"\t\t           I[PBacklog]\n" \
+		"\t\t           Y[year]\n" \
+		"\t\t           M[onthly]\n" \
+		"\t\t           D[aily]\n" \
+		"\t\t           H[ourly]\n" \
+		"\n\tExample of usage:\n\t $ %s -config=svpn_server.conf /show=backlog\n" };
+
+
 /*
  *  DESCRIPTION: Read old content of the IP Backlog file, add new entry at begin of file,
  *	write new content to file.
@@ -245,7 +257,7 @@ char	ipbuf[32];
 	close(fd);
 
 	if ( !(1 & status) )
-		return;
+		return status;
 
 	for ( i = 1; i <= g_lenbacklog; i++)
 		{
@@ -303,7 +315,7 @@ int	stat_read_rec	(
 		SVPN_STAT	*strec
 			)
 {
-static	status, fd = -1;
+static	int status, fd = -1;
 static	DIR *dir = NULL;
 struct  dirent *dent = NULL;
 static char	fspec[NAME_MAX];
@@ -671,6 +683,12 @@ char	buf[1024];
 struct timespec deltaonline = {0, 0}, now;
 
 	$LOG(STS$K_INFO, "Rev: " __IDENT__ "/"  __ARCH__NAME__   ", (built  at "__DATE__ " " __TIME__ " with CC " __VERSION__ ")");
+
+	if ( argc < 2 )
+		{
+		fprintf(stdout, help, argv[0], argv[0]);
+		return	-EINVAL;
+		}
 
 	/*
 	 * Process command line arguments
