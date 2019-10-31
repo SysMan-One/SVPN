@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNSRV"
-#define	__IDENT__	"X.00-09"
-#define	__REV__		"0.0.09"
+#define	__IDENT__	"X.00-11"
+#define	__REV__		"0.0.11"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -79,6 +79,9 @@
 **
 **	11-OCT-2019	RRL	X.00-09 : Added ping/pong sequences checking;
 **				added backlog of IP address
+**
+**	30-OCT-2019	RRL	X.00-11 : Fixed consuming CPU time has been caused by using wrong end time passed to the pthread_cond_timedwait();
+**				fixe hung in the backlog_uopdate();
 **
 **--
 */
@@ -480,6 +483,7 @@ char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64], fspec[255];
 		sscanf($ASCPTR(&g_ipbacklog), "%[^,\n],%[^\n]" , fspec, mask);
 		__util$str2asc (fspec, &g_ipbacklog);
 		g_lenbacklog = atoi(mask);
+		g_lenbacklog = g_lenbacklog ? g_lenbacklog : 5;
 
 		$IFTRACE(g_trace, "IPBACKLOG=%.*s, LENIPBACKLOG=%d", $ASC(&g_ipbacklog), g_lenbacklog);
 		}
@@ -1348,7 +1352,7 @@ char	lobuf[64];
 		$LOG(STS$K_WARN, "PONG #%d is out of sequence (#%d)", g_inpseq, g_outseq);
 
 	/* Compute RTT */
-	clock_gettime(CLOCK_MONOTONIC, &now);
+	clock_gettime(CLOCK_MONOTONIC_RAW, &now);
 
 	__util$sub_time(&now, &rtt, &g_rtt);
 
@@ -1394,14 +1398,16 @@ struct	timespec now = {0}, etime = {0}, delta = {13, 0};
 
 		if ( g_state != SVPN$K_STATETUN )
 			{
-			if ( rc = clock_gettime(CLOCK_MONOTONIC, &now) )
+			if ( rc = clock_gettime(CLOCK_REALTIME, &now) )
 				g_exit_flag = $LOG(STS$K_ERROR, "[#%d]clock_gettime()->%d, errno=%d", td, rc, errno);
 
 			__util$add_time(&now, &delta, &etime);
 
+
 			pthread_mutex_lock(&crew_mtx);
 			rc = pthread_cond_timedwait(&crea_cond, &crew_mtx, &etime);
 			pthread_mutex_unlock(&crew_mtx);
+
 
 			if ( rc && (rc != ETIMEDOUT) )
 				{
@@ -1784,7 +1790,7 @@ struct timespec now;
 	 * We should add current time and sequence number to performs out-of-sequence checking and
 	 * computing RTT
 	 */
-	clock_gettime(CLOCK_MONOTONIC, &now);
+	clock_gettime(CLOCK_MONOTONIC_RAW, &now);
 
 	if ( !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_TIME, SVPN$K_BBLOCK, &now, sizeof(now), &adjlen))) )
 		return	$LOG(status, "[#%d]Error put attribute", g_udp_sd);
