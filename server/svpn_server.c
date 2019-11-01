@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNSRV"
-#define	__IDENT__	"X.00-11"
-#define	__REV__		"0.0.11"
+#define	__IDENT__	"X.00-12"
+#define	__REV__		"0.0.12"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -81,7 +81,10 @@
 **				added backlog of IP address
 **
 **	30-OCT-2019	RRL	X.00-11 : Fixed consuming CPU time has been caused by using wrong end time passed to the pthread_cond_timedwait();
-**				fixe hung in the backlog_uopdate();
+**				fixed hung in the backlog_uopdate();
+**
+**	31-OCT-2019	RRL	X.00-12 : Added functionality to limit of volume of traffic over tunnel;
+**				new configuration option: DATA_VOLUME_LIMIT=<Gigobytes>
 **
 **--
 */
@@ -94,6 +97,10 @@
 #include	<inttypes.h>
 #include	<signal.h>
 #include	<getopt.h>
+#include	<libgen.h>
+#include	<sys/uio.h>
+#include	<sys/types.h>
+#include	<sys/stat.h>
 
 #include	"sha1.h"
 
@@ -240,6 +247,10 @@ static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
 	g_deltaonline = 300,		/* An interval of printing "Client still ONLINE" */
 	g_lenbacklog = 0;
 
+unsigned long long g_data_volume_limit = 0,	/* A total tunnel traffic volume limit	*/
+		g_data_volume = 0;		/* Current volume of the traffic	*/
+
+
 static	atomic_ullong g_input_count = 0;/* Should be increment by receiving from UDP */
 
 
@@ -253,7 +264,8 @@ ASC	g_tun = {$ASCINI("tunX:")},	/* OS specific TUN device name		*/
 	g_climsg = {0}, g_linkup = {0}, g_linkdown = {0},
 	g_fstat = {0},
 	g_ipbacklog = {0},
-	g_fifo = {0};			/* FIFO spec to interchange by counters	*/
+	g_fifo = {0},			/* FIFO spec to interchange by counters	*/
+	g_volume = {0};			/* File to keep a traficc voulme for the tunnel	*/
 
 
 
@@ -335,6 +347,8 @@ const OPTS optstbl [] =		/* Configuration options		*/
 	{$ASCINI("deltaonline"),&g_deltaonline,	0,	OPTS$K_INT},
 	{$ASCINI("stat"),	&g_fstat,ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("ipbacklog"),	&g_ipbacklog,ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("data_volume_limit"),	&g_data_volume_limit, 0,		OPTS$K_INT},
+
 
 	OPTS_NULL
 };
@@ -450,7 +464,7 @@ unsigned	lmask = 0xFFFFFFFFUL;
 
 static	int	config_process	(void)
 {
-int	status = STS$K_SUCCESS, bits;
+int	status = STS$K_SUCCESS, bits, fd = -1;
 char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64], fspec[255];
 
 	/* /TIMERS*/
@@ -485,7 +499,7 @@ char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64], fspec[255];
 		g_lenbacklog = atoi(mask);
 		g_lenbacklog = g_lenbacklog ? g_lenbacklog : 5;
 
-		$IFTRACE(g_trace, "IPBACKLOG=%.*s, LENIPBACKLOG=%d", $ASC(&g_ipbacklog), g_lenbacklog);
+		$IFTRACE(g_trace, "ipbacklog=%.*s, lenipbacklog=%d", $ASC(&g_ipbacklog), g_lenbacklog);
 		}
 
 
@@ -516,6 +530,31 @@ char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64], fspec[255];
 		$LOG(STS$K_ERROR, "mkfifo(%.*s), errno=%d", $ASC(&g_fifo), errno);
 	else	$LOG(STS$K_SUCCESS, "FIFO device '%.*s' has been created", $ASC(&g_fifo));
 
+	/* Make file name for tunnel volume of traffic */
+	if ( $ASCLEN(&g_fstat) )
+		{
+		/* Volume Data is in Gbytes */
+		g_data_volume_limit *= 1024*1024*1024;
+
+
+		if ( !(cp = dirname( $ASCPTR(&g_fstat))) )
+			cp = "./";
+
+		$ASCLEN(&g_volume) = (unsigned char) snprintf($ASCPTR(&g_volume), ASC$K_SZ, "%s/volume-%.*s.dat", cp, $ASC(&g_tun));
+
+		$LOG(STS$K_SUCCESS, "Keep volume traffic for device in '%.*s', volume limits is %llu (0 - unlimited)", $ASC(&g_volume), g_data_volume_limit);
+
+		/*
+		 * Check for existen Data Volume file and load value from it
+		 */
+		if ( 0 > (fd = open($ASCPTR(&g_volume), O_RDONLY)) )
+			$LOG(STS$K_WARN, "open(%s), errno=%d", $ASCPTR(&g_volume), errno);
+		else if ( sizeof(g_data_volume) != read (fd, &g_data_volume, sizeof(g_data_volume)) )
+			$LOG(STS$K_ERROR, "read(%s, %d octets), errno=%d", $ASCPTR(&g_volume), sizeof(g_data_volume), errno);
+		else	$IFTRACE(g_trace, "Current Data Volume is %llu octets", g_data_volume);
+
+		close(fd);
+		}
 
 	return	STS$K_SUCCESS;
 }
@@ -553,6 +592,7 @@ int	fd = -1, iovlen = sizeof(tmnow) + sizeof(g_stat);
 	return	STS$K_SUCCESS;
 }
 
+
 void	stat_update	(void)
 {
 int	fd = -1;
@@ -580,15 +620,27 @@ SVPN_VSTAT vstat = {0};
 
 	/* Open FIFO device, write stat vector record, close */
 	if ( 0 > (fd = open($ASCPTR(&g_fifo), O_WRONLY | O_NONBLOCK)) )
-		{
 		$IFTRACE(g_trace && (errno != ENXIO),  "open(%.*s), errno=%d", $ASC(&g_fifo), errno);
-		}
 	else if ( sizeof(SVPN_VSTAT) != write(fd, &vstat, sizeof(SVPN_VSTAT)) )
-		{
 		$IFTRACE(g_trace, "write(%.*s, %d octets), errno=%d", $ASC(&g_fifo), sizeof(vstat), errno);
-		}
 
-	close(fd);
+	if ( !(fd < 0) )
+		close(fd);
+
+	/* Adjust total data traffic volume */
+	g_data_volume	+= g_stat.bnetrd;
+	g_data_volume	+= g_stat.bnetwr;
+
+	/*
+	 * Update Data Volume counter in the file
+	 */
+	if ( 0 > (fd = open($ASCPTR(&g_volume), O_WRONLY | O_CREAT, f_mode)) )
+		$LOG(STS$K_ERROR, "open(%s), errno=%d", $ASCPTR(&g_volume), errno);
+	else if ( sizeof(g_data_volume) != write (fd, &g_data_volume, sizeof(g_data_volume)) )
+		$LOG(STS$K_ERROR, "write(%s, %d octets), errno=%d", $ASCPTR(&g_volume), sizeof(g_data_volume), errno);
+
+	if ( !(fd < 0) )
+		close(fd);
 }
 
 /*
@@ -887,7 +939,7 @@ static int	sd = -1;
 			$LOG(STS$K_ERROR, "ioctl(%s, SIOCSIFFLAGS)->%d", ifr.ifr_name, errno);
 		}
 
-	$IFTRACE(g_trace, "set %s to %s", ifr.ifr_name, up_down ? "UP" :  "DOWN");
+	$IFTRACE(g_trace, "Set %s to %s", ifr.ifr_name, up_down ? "UP" :  "DOWN");
 
 	return	STS$K_SUCCESS;
 }
@@ -2046,8 +2098,13 @@ struct timespec deltaonline = {0, 0}, now;
 		$IFTRACE(g_trace, "TUN RD: %llu packets, %llu octets, WR: %llu packets, %llu octets", g_stat.ptunrd, g_stat.btunrd, g_stat.ptunwr, g_stat.btunwr);
 		$IFTRACE(g_trace, "UDP RD: %llu packets, %llu octets, WR: %llu packets, %llu octets", g_stat.ptunrd, g_stat.btunrd, g_stat.ptunwr, g_stat.btunwr);
 
-		/* Update state counters */
+		/* Update state counters
+		 * Do we reach limit ?!
+		 */
 		stat_update();
+
+		if ( g_data_volume_limit && (g_data_volume > g_data_volume_limit) )
+			g_exit_flag = $LOG(STS$K_FATAL, "Data Volume limit (%llu > %llu) is reached! Set exit_flag!", g_data_volume, g_data_volume_limit);
 		}
 
 	set_tun_state(0);		/* Down the tunX */
