@@ -411,7 +411,7 @@ static int	sd = -1;
 	return	STS$K_SUCCESS;
 }
 
-static char tundev_path[] = {"/dev/tun"};
+static char tundev_path[512] = {"/dev/tun"};
 
 static	int	tun_init	(
 			int	*fd
@@ -449,6 +449,11 @@ struct sockaddr_in inaddr = {0};
 		close(*fd);
 		return	$LOG(STS$K_ERROR, "ioctl(TUNSETIFF)->%d, errno=%d", err, errno);
 		}
+
+	if ( err = ioctl(*fd, TUNSETDEBUG, &err) )
+		$LOG(STS$K_ERROR, "ioctl(TUNSETDEBUG)->%d, errno=%d", err, errno);
+
+
 
 	/* Make this device persisten ... */
 	if( err = ioctl(*fd, TUNSETPERSIST, 1) )
@@ -1244,7 +1249,7 @@ struct	sockaddr_in rsock = {0};
 
 
 		/* Retrieve data from TUN device -> send to UDP socket */
-		if ( (pfd[1].revents & POLLIN) && (rc = read (td, buf, sizeof(buf))) )
+		if ( (pfd[1].revents & POLLIN) && (0 < (rc = read (td, buf, sizeof(buf)))) )
 			{
 			slen = sizeof(struct sockaddr_in);
 

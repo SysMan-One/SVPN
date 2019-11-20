@@ -1,5 +1,5 @@
 #define	__MODULE__	"SVPNSRV"
-#define	__IDENT__	"X.00-12"
+#define	__IDENT__	"X.00-12ECO1"
 #define	__REV__		"0.0.12"
 
 #ifdef	__GNUC__
@@ -85,6 +85,8 @@
 **
 **	31-OCT-2019	RRL	X.00-12 : Added functionality to limit of volume of traffic over tunnel;
 **				new configuration option: DATA_VOLUME_LIMIT=<Gigobytes>
+**
+**	20-NOV-2019	RRL	X.00-12ECO1 : Changed displaying of RTT from nsecs to ms.
 **
 **--
 */
@@ -236,7 +238,7 @@ static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
 	g_state = SVPN$K_STATECTL,	/* Initial state for SVPN-Server	*/
 	g_trace = 0,			/* A flag to produce extensible logging	*/
 	g_enc = SVPN$K_ENC_NONE,	/* Encryption mode, default is none	*/
-	g_threads = 3,			/* A size of the worker crew threads	*/
+	g_threads = 1,			/* A size of the worker crew threads	*/
 	g_udp_sd = -1,
 	g_tun_fd = -1,
 	g_mtu = 0,			/* MTU for datagram			*/
@@ -298,7 +300,7 @@ static	SVPN_TIMERS	g_timers_set = { {7, 0}, {120, 0}, {13, 0}, {600, 0}, 3};
 					 */
 static	pthread_mutex_t crew_mtx = PTHREAD_MUTEX_INITIALIZER;
 static	pthread_cond_t	crea_cond = PTHREAD_COND_INITIALIZER;
-
+static	pthread_mutex_t g_udp_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 
 typedef struct	__svpn_stat__
@@ -1505,9 +1507,19 @@ struct	timespec now = {0}, etime = {0}, delta = {13, 0};
 					td, g_udp_sd, rc, pfd[0].revents, pfd[1].revents, __ba_errno__);
 
 		/* Retrieve data from UDP socket -> send to TUN device	*/
+
+
 		slen = sizeof(struct sockaddr_in);
+
+		pthread_mutex_lock(&g_udp_mtx);
+
 		if ( (pfd[0].revents & POLLIN) && (0 < (rc = recvfrom(g_udp_sd, buf, sizeof(buf), 0, &rsock, &slen))) )
 			{
+			pthread_mutex_unlock(&g_udp_mtx);
+
+
+			$IFTRACE(g_trace, "RD UDP %d octets", rc);
+
 			/* Check sender IP, ignore unrelated packets ... */
 			if ( g_client_sk.sin_addr.s_addr != rsock.sin_addr.s_addr )
 				continue;
@@ -1550,25 +1562,34 @@ struct	timespec now = {0}, etime = {0}, delta = {13, 0};
 			if ( rc != write(td, buf, rc) )
 				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on TUN device, write(%d octets), errno=%d", td, g_udp_sd, rc, __ba_errno__);
 
+			$IFTRACE(g_trace, "WR TUN %d octets", rc);
+
 			atomic_fetch_add(&g_stat.btunwr, rc);
 			atomic_fetch_add(&g_stat.ptunwr, 1);
 			}
-		else
 #ifdef WIN32
-		if ( (0 >= status) && (errno != WSAEINPROGRESS) )
+		else if ( (0 >= rc) && (errno != WSAEINPROGRESS) )
 #else
-		if ( (0 >= rc) && (errno != EINPROGRESS) )
+		else if ( (0 >= rc) ) // && (errno != EINPROGRESS) )
 #endif
-			{
-			$LOG(STS$K_ERROR, "[#%d-#%d]recv()->%d, UDP/TUN.revents=%08x/%08x, errno=%d",
-					td, g_udp_sd, rc, pfd[0].revents, pfd[1].revents, __ba_errno__);
-			break;
-			}
+				{
+				pthread_mutex_unlock(&g_udp_mtx);
+
+				$LOG(STS$K_ERROR, "[#%d-#%d]recv()->%d, UDP/TUN.revents=%08x/%08x, errno=%d",
+						td, g_udp_sd, rc, pfd[0].revents, pfd[1].revents, __ba_errno__);
+				break;
+				}
+
+		else	pthread_mutex_unlock(&g_udp_mtx);
 
 
 		/* Retrieve data from TUN device -> send to UDP socket */
-		if ( (pfd[1].revents & POLLIN) && (rc = read (td, buf, sizeof(buf))) )
+		pthread_mutex_lock(&g_udp_mtx);
+
+		if ( (pfd[1].revents & POLLIN) && (0 < (rc = read (td, buf, sizeof(buf)))) )
 			{
+			$IFTRACE(g_trace, "RD TUN %d octets", rc);
+
 			slen = sizeof(struct sockaddr_in);
 
 			atomic_fetch_add(&g_stat.btunrd, rc);
@@ -1585,17 +1606,20 @@ struct	timespec now = {0}, etime = {0}, delta = {13, 0};
 			if ( rc != sendto(g_udp_sd, buf, rc, 0, &g_client_sk, slen) )
 				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on UDP socket, sendto(%d octets), errno=%d", td, g_udp_sd, rc, errno);
 
+			$IFTRACE(g_trace, "WR UDP %d octets", rc);
+
 			atomic_fetch_add(&g_stat.btunwr, rc);
 			atomic_fetch_add(&g_stat.ptunwr, 1);
 			}
 		else
 #ifdef WIN32
-		if ( (0 >= status) && (errno != WSAEINPROGRESS) )
+			if ( (0 >= status) && (errno != WSAEINPROGRESS) )
 #else
-		if ( (0 >= rc) && (errno != EINPROGRESS) )
+			if ( (0 >= rc) ) // && (errno != EINPROGRESS) )
 #endif
-			$LOG(STS$K_ERROR, "[#%d-#%d]recv()->%d, UDP/TUN.revents=%08x/%08x, errno=%d",
-					td, g_udp_sd, rc, pfd[0].revents, pfd[1].revents, __ba_errno__);
+				$LOG(STS$K_ERROR, "[#%d-#%d]recv()->%d, UDP/TUN.revents=%08x/%08x, errno=%d",
+						td, g_udp_sd, rc, pfd[0].revents, pfd[1].revents, __ba_errno__);
+		pthread_mutex_unlock(&g_udp_mtx);
 		}
 
 
@@ -2074,8 +2098,8 @@ struct timespec deltaonline = {0, 0}, now;
 					__util$add_time(&now, &ts, &deltaonline);
 				else if ( 0 < __util$cmp_time(&now, &deltaonline) )
 					{
-					$LOG(STS$K_INFO, "IP: %s is still ONLINE, RTT %d nsecs", inet_ntop(AF_INET, &g_client_sk.sin_addr, buf, sizeof(buf)),
-						g_rtt.tv_nsec);
+					$LOG(STS$K_INFO, "IP: %s is still ONLINE, RTT %5.2f ms", inet_ntop(AF_INET, &g_client_sk.sin_addr, buf, sizeof(buf)),
+						((float) g_rtt.tv_nsec)/(1000.0*1000.0) );
 
 					__util$add_time(&now, &ts, &deltaonline);
 					}
