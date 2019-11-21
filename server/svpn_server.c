@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNSRV"
-#define	__IDENT__	"X.00-12ECO1"
-#define	__REV__		"0.0.12"
+#define	__IDENT__	"X.00-13"
+#define	__REV__		"0.0.13"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -88,6 +88,9 @@
 **
 **	20-NOV-2019	RRL	X.00-12ECO1 : Changed displaying of RTT from nsecs to ms.
 **
+**	21-NOV-2019	RRL	X.00-13 : Added record in the log file on receiving of SIGUSR2;
+**				Added assigment of the NETWORK MASK on the TUN device.
+**
 **--
 */
 
@@ -143,15 +146,14 @@
 #include	<fcntl.h>
 #include	<poll.h>
 #include	<sys/ioctl.h>
-#include	<net/if.h>
 #include	<linux/if.h>
 #include	<linux/if_tun.h>
 #include	<linux/limits.h>
 #include	<stdatomic.h>
-#include	<net/if.h>
-#include	<netinet/tcp.h>
+#include	<net/ethernet.h>
 #include	<netinet/ip.h>
 #include	<netinet/ip6.h>
+#include	<netinet/tcp.h>
 
 #endif
 
@@ -252,11 +254,14 @@ static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
 unsigned long long g_data_volume_limit = 0,	/* A total tunnel traffic volume limit	*/
 		g_data_volume = 0;		/* Current volume of the traffic	*/
 
+static	volatile int	reset_by_external_flag = 0;
+
 
 static	atomic_ullong g_input_count = 0;/* Should be increment by receiving from UDP */
 
 
 static const struct timespec g_locktmo = {5, 0};/* A timeout for thread's wait lock	*/
+
 ASC	g_tun = {$ASCINI("tunX:")},	/* OS specific TUN device name		*/
 	g_logfspec = {0}, g_confspec = {0},
 	g_bind = {0}, g_cliname = {0}, g_auth = {0},
@@ -300,7 +305,6 @@ static	SVPN_TIMERS	g_timers_set = { {7, 0}, {120, 0}, {13, 0}, {600, 0}, 3};
 					 */
 static	pthread_mutex_t crew_mtx = PTHREAD_MUTEX_INITIALIZER;
 static	pthread_cond_t	crea_cond = PTHREAD_COND_INITIALIZER;
-static	pthread_mutex_t g_udp_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 
 typedef struct	__svpn_stat__
@@ -1011,8 +1015,20 @@ struct sockaddr_in inaddr = {0};
 	if ( err = ioctl(sd, SIOCSIFADDR, (void *)&ifr) )
 		{
 		close(*fd);
-		return	$LOG(STS$K_ERROR, "ioctl(SIOCSIFADDR)->%d, errno=%d", err, errno);
+		return	$LOG(STS$K_ERROR, "Error set IP on TUN, ioctl(SIOCSIFADDR)->%d, errno=%d", err, errno);
 		}
+
+
+	/* Assign Network mask ... */
+	inaddr.sin_addr = g_netmask;
+	inaddr.sin_family = AF_INET;
+
+	memcpy(&ifr.ifr_netmask, &inaddr, sizeof(struct sockaddr));
+
+	if ( err = ioctl(sd, SIOCSIFNETMASK, (void *)&ifr) )
+		$LOG(STS$K_ERROR, "Error set NETMASK for TUN, ioctl(SIOCSIFNETMASK)->%d, errno=%d", err, errno);
+
+
 
 	return	STS$K_SUCCESS;
 }
@@ -1300,6 +1316,8 @@ static	void	sig_handler (int signo)
 		fflush(stdout);
 		_exit(signo);
 		}
+	else if ( signo == SIGUSR2 )
+			atomic_flag_clear (&reset_by_external_flag);
 	else if ( (signo == SIGTERM) || (signo == SIGINT) )
 		{
 	#ifdef WIN32
@@ -1328,6 +1346,8 @@ static	void	init_sig_handler(void)
 {
 const int siglist [] = {SIGTERM, SIGINT, 0 };
 int	i;
+
+	atomic_flag_clear (&reset_by_external_flag);
 
 	for ( i = 0; siglist[i]; i++)
 		{
@@ -1430,6 +1450,8 @@ struct	sockaddr_in rsock = {0};
 char	buf [SVPN$SZ_IOBUF];
 SVPN_PDU *pdu = (SVPN_PDU *) buf;
 struct	timespec now = {0}, etime = {0}, delta = {13, 0};
+struct iphdr *iph = (struct iphdr *) &buf [ ETHER_HDR_LEN ];
+struct tcphdr *tcph;
 
 	/* Open channel to TUN device */
 	if ( !(1 & (rc = tun_open(&td))) )
@@ -1507,19 +1529,10 @@ struct	timespec now = {0}, etime = {0}, delta = {13, 0};
 					td, g_udp_sd, rc, pfd[0].revents, pfd[1].revents, __ba_errno__);
 
 		/* Retrieve data from UDP socket -> send to TUN device	*/
-
-
 		slen = sizeof(struct sockaddr_in);
-
-		pthread_mutex_lock(&g_udp_mtx);
 
 		if ( (pfd[0].revents & POLLIN) && (0 < (rc = recvfrom(g_udp_sd, buf, sizeof(buf), 0, &rsock, &slen))) )
 			{
-			pthread_mutex_unlock(&g_udp_mtx);
-
-
-			$IFTRACE(g_trace, "RD UDP %d octets", rc);
-
 			/* Check sender IP, ignore unrelated packets ... */
 			if ( g_client_sk.sin_addr.s_addr != rsock.sin_addr.s_addr )
 				continue;
@@ -1559,10 +1572,16 @@ struct	timespec now = {0}, etime = {0}, delta = {13, 0};
 			if ( g_enc != SVPN$K_ENC_NONE )
 				decode(g_enc, buf, rc, g_key, sizeof(g_key));
 
+			if ( iph->protocol == IPPROTO_TCP )
+				{
+				tcph = (struct tcphdr *) &buf [iph->ihl*4];
+
+				$IFTRACE(g_trace, "NET [IP.ID=%05.5u]     ->       TUN %d octets", ntohs(iph->id), rc);
+				}
+
+
 			if ( rc != write(td, buf, rc) )
 				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on TUN device, write(%d octets), errno=%d", td, g_udp_sd, rc, __ba_errno__);
-
-			$IFTRACE(g_trace, "WR TUN %d octets", rc);
 
 			atomic_fetch_add(&g_stat.btunwr, rc);
 			atomic_fetch_add(&g_stat.ptunwr, 1);
@@ -1573,22 +1592,25 @@ struct	timespec now = {0}, etime = {0}, delta = {13, 0};
 		else if ( (0 >= rc) ) // && (errno != EINPROGRESS) )
 #endif
 				{
-				pthread_mutex_unlock(&g_udp_mtx);
-
 				$LOG(STS$K_ERROR, "[#%d-#%d]recv()->%d, UDP/TUN.revents=%08x/%08x, errno=%d",
 						td, g_udp_sd, rc, pfd[0].revents, pfd[1].revents, __ba_errno__);
 				break;
 				}
 
-		else	pthread_mutex_unlock(&g_udp_mtx);
-
-
 		/* Retrieve data from TUN device -> send to UDP socket */
-		pthread_mutex_lock(&g_udp_mtx);
-
 		if ( (pfd[1].revents & POLLIN) && (0 < (rc = read (td, buf, sizeof(buf)))) )
 			{
-			$IFTRACE(g_trace, "RD TUN %d octets", rc);
+
+
+			if ( iph->protocol == IPPROTO_TCP )
+				{
+				tcph = (struct tcphdr *) &buf [iph->ihl*4];
+
+				$IFTRACE(g_trace, "NET      <-       [IP.ID=%05.5u]TUN %d octets", ntohs(iph->id), rc);
+				}
+
+
+
 
 			slen = sizeof(struct sockaddr_in);
 
@@ -1606,8 +1628,6 @@ struct	timespec now = {0}, etime = {0}, delta = {13, 0};
 			if ( rc != sendto(g_udp_sd, buf, rc, 0, &g_client_sk, slen) )
 				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on UDP socket, sendto(%d octets), errno=%d", td, g_udp_sd, rc, errno);
 
-			$IFTRACE(g_trace, "WR UDP %d octets", rc);
-
 			atomic_fetch_add(&g_stat.btunwr, rc);
 			atomic_fetch_add(&g_stat.ptunwr, 1);
 			}
@@ -1619,7 +1639,7 @@ struct	timespec now = {0}, etime = {0}, delta = {13, 0};
 #endif
 				$LOG(STS$K_ERROR, "[#%d-#%d]recv()->%d, UDP/TUN.revents=%08x/%08x, errno=%d",
 						td, g_udp_sd, rc, pfd[0].revents, pfd[1].revents, __ba_errno__);
-		pthread_mutex_unlock(&g_udp_mtx);
+
 		}
 
 
@@ -1998,6 +2018,9 @@ struct timespec deltaonline = {0, 0}, now;
 	/**/
 	for ( idle_count = 0; !g_exit_flag; __util$rewindlogfile(g_logsize) )
 		{
+		if ( !atomic_flag_test_and_set(&reset_by_external_flag) )
+			$LOG(STS$K_INFO, "Resetting has been initated by sTunMon Control Process");
+
 		if ( g_state == SVPN$K_STATECTL )
 			{
 			if ( 1 & control () )
