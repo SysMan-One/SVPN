@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNCLNT"
-#define	__IDENT__	"X.00-07"
-#define	__REV__		"0.0.07"
+#define	__IDENT__	"X.00-08"
+#define	__REV__		"0.0.08"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -77,6 +77,8 @@
 **	10-OCT-2019	RRL	Improved diagnostic output.
 **
 **	30-OCT-2019	RRL	Fixed consuming CPU by incorrect using CLOCK_MONOTONIC for pthread_cond_timewait()
+**
+**	21-NOV-2019	RRL	X.00-08 : Added assigment of the NETWORK MASK on the TUN device.
 **
 **--
 */
@@ -534,7 +536,17 @@ struct sockaddr_in inaddr = {0};
 	memcpy(&ifr.ifr_addr, &inaddr, sizeof(struct sockaddr));
 
 	if ( err = ioctl(g_tun_sdctl, SIOCSIFADDR, (void *)&ifr) )
-		return	$LOG(STS$K_ERROR, "ioctl(SIOCSIFADDR)->%d, errno=%d", err, errno);
+		return	$LOG(STS$K_ERROR, "Error set IP on TUN, ioctl(SIOCSIFADDR)->%d, errno=%d", err, errno);
+
+
+	/* Assign Network mask ... */
+	inaddr.sin_addr = g_ia_netmask;
+	inaddr.sin_family = AF_INET;
+
+	memcpy(&ifr.ifr_netmask, &inaddr, sizeof(struct sockaddr));
+
+	if ( err = ioctl(g_tun_sdctl, SIOCSIFNETMASK, (void *)&ifr) )
+		return	$LOG(STS$K_ERROR, "Error set NETMASK for TUN, ioctl(SIOCSIFNETMASK)->%d, errno=%d", err, errno);
 
 
 	/* Set state of the TUN - UP ... */
@@ -545,7 +557,7 @@ struct sockaddr_in inaddr = {0};
 	ifr.ifr_ifru.ifru_flags |= IFF_UP;
 
 	if ( err = ioctl(g_tun_sdctl, SIOCSIFFLAGS, &ifr) )
-		return	$LOG(STS$K_ERROR, "ioctl(SIOCSIFFLAGS)->%d", err, errno);
+		return	$LOG(STS$K_ERROR, "Error set TUN to UP state, ioctl(SIOCSIFFLAGS)->%d", err, errno);
 
 
 	return	STS$K_SUCCESS;
