@@ -224,7 +224,8 @@ static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
 	g_tun_sdctl = -1,
 	g_mss = 0,			/* MTU for datagram			*/
 	g_mtu = 0,			/* MSS for TCP/SYN			*/
-	g_logsize = 0;			/* A maximum lofgile size in octets	*/
+	g_logsize = 0,			/* A maximum lofgile size in octets	*/
+	g_tunflags = IFF_TUN;		/* Default type of the '/dev/net/tun'	*/
 
 static	atomic_ullong g_input_count = 0;/* Should be increment by receiving from UDP */
 
@@ -439,7 +440,7 @@ struct sockaddr_in inaddr = {0};
 	*        IFF_NO_PI - Do not provide packet information
 	*        IFF_MULTI_QUEUE - Create a queue of multiqueue device
 	*/
-	ifr.ifr_flags = IFF_TAP | IFF_NO_PI; // | IFF_MULTI_QUEUE;
+	ifr.ifr_flags = g_tunflags  /*IFF_TAP*/ | IFF_NO_PI; // | IFF_MULTI_QUEUE;
 	strncpy(ifr.ifr_name, $ASCPTR(&g_tun), IFNAMSIZ);
 
 	/* Allocate new /devtunX ... */
@@ -452,13 +453,8 @@ struct sockaddr_in inaddr = {0};
 		return	$LOG(STS$K_ERROR, "ioctl(TUNSETIFF)->%d, errno=%d", err, errno);
 		}
 
-	if ( err = ioctl(*fd, TUNSETDEBUG, &err) )
-		$LOG(STS$K_ERROR, "ioctl(TUNSETDEBUG)->%d, errno=%d", err, errno);
-
-
-
-	/* Make this device persisten ... */
-	if( err = ioctl(*fd, TUNSETPERSIST, 1) )
+	/* Disable persistence for the TUN device */
+	if( err = ioctl(*fd, TUNSETPERSIST, 0) )
 		{
 		close(*fd);
 		return	$LOG(STS$K_ERROR, "ioctl(TUNSETPERSIST)->%d, errno=%d", err, errno);
@@ -505,7 +501,7 @@ int	err;
 	*        IFF_NO_PI - Do not provide packet information
 	*        IFF_MULTI_QUEUE - Create a queue of multiqueue device
 	*/
-	ifr.ifr_flags = IFF_TAP | IFF_NO_PI; // | IFF_MULTI_QUEUE;
+	ifr.ifr_flags = g_tunflags /* IFF_TAP */ | IFF_NO_PI; // | IFF_MULTI_QUEUE;
 	strncpy(ifr.ifr_name, $ASCPTR(&g_tun), IFNAMSIZ);
 
 	if ( 0 > (*fd = open(tundev_path, O_RDWR)) )
@@ -517,6 +513,8 @@ int	err;
 		return	$LOG(STS$K_ERROR, "ioctl(TUNSETIFF)->%d, errno=%d", err, errno);
 		}
 
+	$LOG(STS$K_INFO, "TUN's device type is %s", g_tunflags == IFF_TAP ? "TAP (no Ethernet headers)" : "TUN");
+
 	return	STS$K_SUCCESS;
 }
 
@@ -524,10 +522,27 @@ int	err;
 static	int	tun_setip(void)
 {
 struct ifreq ifr = {0};
-int	err;
+int	err, fd = -1;
 struct sockaddr_in inaddr = {0};
 
+	/* Flags: IFF_TUN   - TUN device (no Ethernet headers)
+	*        IFF_TAP   - TAP device
+	*
+	*        IFF_NO_PI - Do not provide packet information
+	*        IFF_MULTI_QUEUE - Create a queue of multiqueue device
+	*/
+	ifr.ifr_flags = g_tunflags /* IFF_TAP */ | IFF_NO_PI; // | IFF_MULTI_QUEUE;
 	strncpy(ifr.ifr_name, $ASCPTR(&g_tun), IFNAMSIZ);
+
+	if ( 0 > (fd = open(tundev_path, O_RDWR)) )
+		return	$LOG(STS$K_ERROR, "open(*s), errno=%d", tundev_path, errno);
+
+
+	if ( err = ioctl(fd, TUNSETIFF, (void *)&ifr) )
+		return	$LOG(STS$K_ERROR, "ioctl(TUNSETIFF)->%d, errno=%d", err, errno);
+
+	$LOG(STS$K_INFO, "TUN's device type is %s", g_tunflags == IFF_TAP ? "TAP (no Ethernet headers)" : "TUN");
+
 
 	/* Assign IP address ... */
 	inaddr.sin_addr = g_ia_cliaddr;
@@ -538,7 +553,6 @@ struct sockaddr_in inaddr = {0};
 	if ( err = ioctl(g_tun_sdctl, SIOCSIFADDR, (void *)&ifr) )
 		return	$LOG(STS$K_ERROR, "Error set IP on TUN, ioctl(SIOCSIFADDR)->%d, errno=%d", err, errno);
 
-
 	/* Assign Network mask ... */
 	inaddr.sin_addr = g_ia_netmask;
 	inaddr.sin_family = AF_INET;
@@ -547,7 +561,6 @@ struct sockaddr_in inaddr = {0};
 
 	if ( err = ioctl(g_tun_sdctl, SIOCSIFNETMASK, (void *)&ifr) )
 		return	$LOG(STS$K_ERROR, "Error set NETMASK for TUN, ioctl(SIOCSIFNETMASK)->%d, errno=%d", err, errno);
-
 
 	/* Set state of the TUN - UP ... */
 	if( err = ioctl(g_tun_sdctl, SIOCGIFFLAGS, &ifr) )
@@ -1020,6 +1033,9 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
 	len = sizeof(int);
 	tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_TRACE, &v_type, &g_trace, &len);
 
+	len = sizeof(g_tunflags);
+	tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_TUNTYPE, &v_type, &g_tunflags, &len);
+
 	/* Display session parameters ... */
 	$LOG(STS$K_INFO, "Session parameters  :");
 
@@ -1029,6 +1045,7 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
 	$LOG(STS$K_INFO, "\tTUN/IP     : %s", inet_ntop(AF_INET, &g_ia_cliaddr, buf, sizeof(buf)));
 	$LOG(STS$K_INFO, "\tEncryption : %d", g_enc);
 	$LOG(STS$K_INFO, "\tMessage    : %.*s", $ASC(&g_climsg));
+	$LOG(STS$K_INFO, "\tTUN Type   : %s", g_tunflags == IFF_TAP ? "TAP (no Ethernet headers)" : "TUN");
 
 	$LOG(STS$K_INFO, "\tTimers     : ping=%u, idle=%u, total=%u, retry=%d",
 	     g_timers_set.t_ping.tv_sec, g_timers_set.t_idle.tv_sec, g_timers_set.t_max.tv_sec, g_timers_set.retry);
@@ -1387,6 +1404,8 @@ pthread_t	tid;
 		if ( g_state == SVPN$K_STATEON )
 			{
 			idle_count = 0;
+
+			tun_init()
 
 			exec_script(&g_linkup);
 

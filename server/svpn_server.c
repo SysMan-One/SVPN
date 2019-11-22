@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNSRV"
-#define	__IDENT__	"X.00-13"
-#define	__REV__		"0.0.13"
+#define	__IDENT__	"X.00-14"
+#define	__REV__		"0.0.14"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -90,6 +90,8 @@
 **
 **	21-NOV-2019	RRL	X.00-13 : Added record in the log file on receiving of SIGUSR2;
 **				Added assigment of the NETWORK MASK on the TUN device.
+**
+**	22-NOV-2019	RRL	X.00-14 : Added /TYPETUN=TAP|TUN
 **
 **--
 */
@@ -249,7 +251,8 @@ static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
 	g_inpseq,			/* A sequence number for received PONG	*/
 	g_logsize = 0,			/* A maximum lofgile size in octets	*/
 	g_deltaonline = 300,		/* An interval of printing "Client still ONLINE" */
-	g_lenbacklog = 0;
+	g_lenbacklog = 0,
+	g_tunflags = IFF_TAP;		/* Default type of the '/dev/net/tun'	*/
 
 unsigned long long g_data_volume_limit = 0,	/* A total tunnel traffic volume limit	*/
 		g_data_volume = 0;		/* Current volume of the traffic	*/
@@ -271,9 +274,9 @@ ASC	g_tun = {$ASCINI("tunX:")},	/* OS specific TUN device name		*/
 	g_climsg = {0}, g_linkup = {0}, g_linkdown = {0},
 	g_fstat = {0},
 	g_ipbacklog = {0},
-	g_fifo = {0},			/* FIFO spec to interchange by counters	*/
-	g_volume = {0};			/* File to keep a traficc voulme for the tunnel	*/
-
+	g_fifo = {0},			/* FIFO spec to interchange by counters		*/
+	g_volume = {0},			/* File to keep a traficc voulme for the tunnel	*/
+	g_tuntype = {$ASCINI("TAP")};	/* Default type of the TUN device is TAP	*/
 
 
 struct in_addr g_ia_network = {0}, g_ia_local = {0}, g_ia_cliaddr = {0} , g_netmask = {-1};
@@ -354,6 +357,7 @@ const OPTS optstbl [] =		/* Configuration options		*/
 	{$ASCINI("stat"),	&g_fstat,ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("ipbacklog"),	&g_ipbacklog,ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("data_volume_limit"),	&g_data_volume_limit, 0,		OPTS$K_INT},
+	{$ASCINI("typetun"),	&g_tuntype,ASC$K_SZ,	OPTS$K_STR},
 
 
 	OPTS_NULL
@@ -561,6 +565,30 @@ char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64], fspec[255];
 
 		close(fd);
 		}
+
+	/* /TYPETUN=[TAP]|TUN */
+	if ( $ASCLEN(&g_tuntype) >= 2 )
+		{
+		cp  = $ASCPTR(&g_tuntype);
+		cp++;
+
+		switch ( toupper(*cp))
+			{
+			case	'U':	/* TUN */
+				g_tunflags = IFF_TUN;
+				break;
+
+			case	'A':	/* TAP */
+				g_tunflags = IFF_TAP;
+				break;
+
+			default:
+				$LOG(STS$K_ERROR, "Unrecognized TUN's type='%.*s'", $ASC(&g_tuntype));
+
+			}
+		}
+
+	$LOG(STS$K_INFO, "TUN's device type is %s", g_tunflags == IFF_TAP ? "TAP (no Ethernet headers)" : "TUN");
 
 	return	STS$K_SUCCESS;
 }
@@ -966,7 +994,7 @@ struct sockaddr_in inaddr = {0};
 	*        IFF_NO_PI - Do not provide packet information
 	*        IFF_MULTI_QUEUE - Create a queue of multiqueue device
 	*/
-	ifr.ifr_flags = IFF_TAP | IFF_NO_PI | IFF_MULTI_QUEUE;
+	ifr.ifr_flags = g_tunflags  /*IFF_TAP*/ | IFF_NO_PI | IFF_MULTI_QUEUE;
 	strncpy(ifr.ifr_name, $ASCPTR(&g_tun), IFNAMSIZ);
 
 	/* Allocate new /devtunX ... */
@@ -979,12 +1007,13 @@ struct sockaddr_in inaddr = {0};
 		return	$LOG(STS$K_ERROR, "ioctl(TUNSETIFF)->%d, errno=%d", err, errno);
 		}
 
-	/* Make this device persisten ... */
-	if( err = ioctl(*fd, TUNSETPERSIST, 1) )
+	/* Disable persistence for the TUN device */
+	if( err = ioctl(*fd, TUNSETPERSIST, 0) )
 		{
 		close(*fd);
 		return	$LOG(STS$K_ERROR, "ioctl(TUNSETPERSIST)->%d, errno=%d", err, errno);
 		}
+
 
 	/* Set initial state of the TUN - DOWN ... */
 	if ( 0 > (sd = socket(AF_INET, SOCK_DGRAM, 0)) )
@@ -1048,7 +1077,7 @@ int	err;
 	*        IFF_NO_PI - Do not provide packet information
 	*        IFF_MULTI_QUEUE - Create a queue of multiqueue device
 	*/
-	ifr.ifr_flags = IFF_TAP | IFF_NO_PI | IFF_MULTI_QUEUE;
+	ifr.ifr_flags = g_tunflags  /*IFF_TAP*/ | IFF_NO_PI | IFF_MULTI_QUEUE;
 	strncpy(ifr.ifr_name, $ASCPTR(&g_tun), IFNAMSIZ);
 
 	if ( 0 > (*fd = open("/dev/net/tun", O_RDWR)) )
@@ -1790,6 +1819,11 @@ SHA1Context	sha = {0};
 		buflen += adjlen;
 		bufsz -= adjlen;
 		}
+
+
+	tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_TUNTYPE, SVPN$K_LONG, &g_tunflags, sizeof(g_tunflags), &adjlen);
+	buflen += adjlen;
+	bufsz -= adjlen;
 
 
 	tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_NET, SVPN$K_IP, &g_ia_network, sizeof(struct in_addr), &adjlen);

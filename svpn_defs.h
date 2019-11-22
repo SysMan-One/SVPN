@@ -51,12 +51,14 @@ enum	{
 	SVPN$K_PROTO_V1 = 1	/* A current version of the handshake protocol	*/
 };
 
+
 enum	{
 	SVPN$K_ENC_NONE = 0,	/* Encryption of data:	ZERO - no encryption */
 	SVPN$K_ENC_XOR,		/* XOR with static key	*/
 	SVPN$K_ENC_IDEA,	/* IDEA with PSK	*/
 	SVPN$K_ENC_TWOFISH,	/* TWOFISH with PSK	*/
 };
+
 
 enum	{
 	SVPN$K_TAG_NAME = 1,	/* BBLOCK/ASCII	*/
@@ -73,7 +75,8 @@ enum	{
 	SVPN$K_TAG_USER,	/* BBLOCK/ASCII	*/
 	SVPN$K_TAG_TIME,	/* timespec	*/
 	SVPN$K_TAG_SEQ,		/* LONGWORD	*/
-	SVPN$K_TAG_REV		/* BBLOCK/ASCII	*/
+	SVPN$K_TAG_REV,		/* BBLOCK/ASCII	*/
+	SVPN$K_TAG_TUNTYPE	/* WORD		*/
 };
 
 
@@ -83,7 +86,6 @@ enum	{
 	SVPN$K_STATETUN,	/* In data tunneling mode	*/
 	SVPN$K_STATEOFF		/* Data channel is need to be closed */
 };
-
 
 
 enum	{			/* Signaling channel requests */
@@ -96,10 +98,6 @@ enum	{			/* Signaling channel requests */
 	SVPN$K_REQ_PING,
 	SVPN$K_REQ_PONG
 };
-
-
-
-
 
 
 #pragma	pack	(push, 1)
@@ -140,6 +138,7 @@ typedef struct	__svpn_pdu
 	unsigned char	data[0];	/* Placeholder for payload of the PDU */
 } SVPN_PDU;
 
+
 #define	SVPN$SZ_PDUHDR	(offsetof(struct __svpn_pdu, data))
 #define	SVPN$SZ_HASHED	(offsetof(struct __svpn_pdu, digest))
 
@@ -155,6 +154,7 @@ typedef struct	__svpn_tlv
 		unsigned long long q_val[0];
 	};
 } SVPN_TLV;
+
 
 enum	{
 	SVPN$K_BBLOCK = 0,		/* Octets block			*/
@@ -174,7 +174,6 @@ enum	{
 
 int	tlv_get (void *buf, int bufsz, unsigned v_tag, unsigned *v_type, void *val, unsigned *valsz);
 int	tlv_put (void *buf, unsigned bufsz, unsigned v_tag, unsigned v_type, void *val, unsigned valsz, unsigned *adjlen);
-
 
 
 /**
