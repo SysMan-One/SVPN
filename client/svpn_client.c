@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNCLNT"
-#define	__IDENT__	"X.00-08"
-#define	__REV__		"0.0.08"
+#define	__IDENT__	"X.00-09"
+#define	__REV__		"0.0.09"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -78,7 +78,9 @@
 **
 **	30-OCT-2019	RRL	Fixed consuming CPU by incorrect using CLOCK_MONOTONIC for pthread_cond_timewait()
 **
-**	21-NOV-2019	RRL	X.00-08 : Added assigment of the NETWORK MASK on the TUN device.
+**	21-NOV-2019	RRL	X.00-08 : Added assingment of the NETWORK MASK on the TUN device.
+**
+**	23-NOV-2019	RRL	X.00-09 : Changed default mode for TUN device to TUN
 **
 **--
 */
@@ -283,16 +285,16 @@ const OPTS optstbl [] =		/* Configuration options		*/
 
 
 const char	help [] = { "Usage:\n" \
-		"$ %s [<options_list>]\n\n" \
-		"\t/CONFIG=<file>    configuration options file path\n" \
-		"\t/TRACE            enable extensible diagnostic output\n" \
-		"\t/LOGFILE=<file>   a specification of file to accept logging\n" \
-		"\t/LOGSIZE=<number> a maximum size of file in octets\n" \
-		"\t/LINKUP=<file>    script to be executed on tunnel up\n" \
-		"\t/LINKDOWN=<file>  script to be executed on tunnel down\n" \
-		"\t/AUTH=<user:pass> username and password pair\n" \
-		"\t/SERVER=<ip:port> IP address of name and port pair of remote SVPN server\n" \
-		"\n\tExample of usage:\n\t $ %s -config=svpn_client.conf /trace\n" };
+	"$ %s [<options_list>]\n\n" \
+	"\t/CONFIG=<file>    configuration options file path\n" \
+	"\t/TRACE            enable extensible diagnostic output\n" \
+	"\t/LOGFILE=<file>   a specification of file to accept logging\n" \
+	"\t/LOGSIZE=<number> a maximum size of file in octets\n" \
+	"\t/LINKUP=<file>    script to be executed on tunnel up\n" \
+	"\t/LINKDOWN=<file>  script to be executed on tunnel down\n" \
+	"\t/AUTH=<user:pass> username and password pair\n" \
+	"\t/SERVER=<ip:port> IP address of name and port pair of remote SVPN server\n" \
+	"\n\tExample of usage:\n\t $ %s -config=svpn_client.conf /trace\n" };
 
 int	exec_script	(
 		ASC	*script
@@ -397,7 +399,7 @@ static int	sd = -1;
 
 	strncpy(ifr.ifr_name, $ASCPTR(&g_tun), IFNAMSIZ);
 
-	/* DOWN the TUN/TAP device */
+	/* UP/OWN the TUN/TAP device */
 	if( ioctl(sd, SIOCGIFFLAGS, &ifr) )
 		$LOG(STS$K_ERROR, "ioctl(%s)->%d", ifr.ifr_name, errno);
 	else	{
@@ -525,6 +527,7 @@ struct ifreq ifr = {0};
 int	err, fd = -1;
 struct sockaddr_in inaddr = {0};
 
+
 	/* Flags: IFF_TUN   - TUN device (no Ethernet headers)
 	*        IFF_TAP   - TAP device
 	*
@@ -534,14 +537,17 @@ struct sockaddr_in inaddr = {0};
 	ifr.ifr_flags = g_tunflags /* IFF_TAP */ | IFF_NO_PI; // | IFF_MULTI_QUEUE;
 	strncpy(ifr.ifr_name, $ASCPTR(&g_tun), IFNAMSIZ);
 
+#if 0
 	if ( 0 > (fd = open(tundev_path, O_RDWR)) )
 		return	$LOG(STS$K_ERROR, "open(*s), errno=%d", tundev_path, errno);
 
 
 	if ( err = ioctl(fd, TUNSETIFF, (void *)&ifr) )
 		return	$LOG(STS$K_ERROR, "ioctl(TUNSETIFF)->%d, errno=%d", err, errno);
+#endif
 
 	$LOG(STS$K_INFO, "TUN's device type is %s", g_tunflags == IFF_TAP ? "TAP (no Ethernet headers)" : "TUN");
+
 
 
 	/* Assign IP address ... */
@@ -1404,8 +1410,6 @@ pthread_t	tid;
 		if ( g_state == SVPN$K_STATEON )
 			{
 			idle_count = 0;
-
-			tun_init()
 
 			exec_script(&g_linkup);
 
