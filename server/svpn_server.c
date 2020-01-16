@@ -1,5 +1,5 @@
 #define	__MODULE__	"SVPNSRV"
-#define	__IDENT__	"X.00-14"
+#define	__IDENT__	"X.00-14ECO2"
 #define	__REV__		"0.0.14"
 
 #ifdef	__GNUC__
@@ -91,8 +91,11 @@
 **	21-NOV-2019	RRL	X.00-13 : Added record in the log file on receiving of SIGUSR2;
 **				Added assigment of the NETWORK MASK on the TUN device.
 **
-**	22-NOV-2019	RRL	X.00-14 : Added /TYPETUN=TAP|TUN
+**	22-NOV-2019	RRL	X.00-14 : Added /MODETUN=TAP|TUN, TUN is default mode;
+**				fixed bug with handling of SIGUSR2
 **
+**	24-NOV-2019	RRL	X.00-14ECO1 : Fixed bug in RTT computation has implied bu bug in the __util$sub_time()
+**				X.00-14ECO2 : fixed exiting by incorrect handling SIGUSR2.
 **--
 */
 
@@ -252,7 +255,7 @@ static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
 	g_logsize = 0,			/* A maximum lofgile size in octets	*/
 	g_deltaonline = 300,		/* An interval of printing "Client still ONLINE" */
 	g_lenbacklog = 0,
-	g_tunflags = IFF_TAP;		/* Default type of the '/dev/net/tun'	*/
+	g_tunflags = IFF_TUN;		/* Default type of the '/dev/net/tun'	*/
 
 unsigned long long g_data_volume_limit = 0,	/* A total tunnel traffic volume limit	*/
 		g_data_volume = 0;		/* Current volume of the traffic	*/
@@ -276,7 +279,7 @@ ASC	g_tun = {$ASCINI("tunX:")},	/* OS specific TUN device name		*/
 	g_ipbacklog = {0},
 	g_fifo = {0},			/* FIFO spec to interchange by counters		*/
 	g_volume = {0},			/* File to keep a traficc voulme for the tunnel	*/
-	g_tuntype = {$ASCINI("TAP")};	/* Default type of the TUN device is TAP	*/
+	g_tunmode = {$ASCINI("TUN")};	/* Default type of the TUN device is TAP	*/
 
 
 struct in_addr g_ia_network = {0}, g_ia_local = {0}, g_ia_cliaddr = {0} , g_netmask = {-1};
@@ -357,7 +360,7 @@ const OPTS optstbl [] =		/* Configuration options		*/
 	{$ASCINI("stat"),	&g_fstat,ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("ipbacklog"),	&g_ipbacklog,ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("data_volume_limit"),	&g_data_volume_limit, 0,		OPTS$K_INT},
-	{$ASCINI("typetun"),	&g_tuntype,ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("modetun"),	&g_tunmode,ASC$K_SZ,	OPTS$K_STR},
 
 
 	OPTS_NULL
@@ -366,15 +369,15 @@ const OPTS optstbl [] =		/* Configuration options		*/
 const mode_t f_mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
 
 const char	help [] = { "Usage:\n" \
-		"$ %s [<options_list>]\n\n" \
-		"\t/CONFIG=<file>    configuration options file path\n" \
-		"\t/TRACE            enable extensible diagnostic output\n" \
-		"\t/LOGFILE=<file>   a specification of file to accept logging\n" \
-		"\t/LOGSIZE=<number> a maximum size of file in octets\n" \
-		"\t/LINKUP=<file>    script to be executed on tunnel up\n" \
-		"\t/LINKDOWN=<file>  script to be executed on tunnel down\n" \
-		"\t/AUTH=<user:pass> username and password pair\n" \
-		"\n\tExample of usage:\n\t $ %s -config=svpn_server.conf /trace\n\n" };
+	"$ %s [<options_list>]\n\n" \
+	"\t/CONFIG=<file>    configuration options file path\n" \
+	"\t/TRACE            enable extensible diagnostic output\n" \
+	"\t/LOGFILE=<file>   a specification of file to accept logging\n" \
+	"\t/LOGSIZE=<number> a maximum size of file in octets\n" \
+	"\t/LINKUP=<file>    script to be executed on tunnel up\n" \
+	"\t/LINKDOWN=<file>  script to be executed on tunnel down\n" \
+	"\t/AUTH=<user:pass> username and password pair\n" \
+	"\n\tExample of usage:\n\t $ %s -config=svpn_server.conf /trace\n\n" };
 
 
 
@@ -566,10 +569,10 @@ char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64], fspec[255];
 		close(fd);
 		}
 
-	/* /TYPETUN=[TAP]|TUN */
-	if ( $ASCLEN(&g_tuntype) >= 2 )
+	/* /MODEUN=TAP|[TUN] */
+	if ( $ASCLEN(&g_tunmode) >= 2 )
 		{
-		cp  = $ASCPTR(&g_tuntype);
+		cp  = $ASCPTR(&g_tunmode);
 		cp++;
 
 		switch ( toupper(*cp))
@@ -583,12 +586,12 @@ char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64], fspec[255];
 				break;
 
 			default:
-				$LOG(STS$K_ERROR, "Unrecognized TUN's type='%.*s'", $ASC(&g_tuntype));
+				$LOG(STS$K_ERROR, "Unrecognized TUN's mode='%.*s'", $ASC(&g_tunmode));
 
 			}
 		}
 
-	$LOG(STS$K_INFO, "TUN's device type is %s", g_tunflags == IFF_TAP ? "TAP (no Ethernet headers)" : "TUN");
+	$LOG(STS$K_INFO, "TUN's device mode is %s", g_tunflags == IFF_TAP ? "TAP (no Ethernet headers)" : "TUN");
 
 	return	STS$K_SUCCESS;
 }
@@ -1008,12 +1011,11 @@ struct sockaddr_in inaddr = {0};
 		}
 
 	/* Disable persistence for the TUN device */
-	if( err = ioctl(*fd, TUNSETPERSIST, 0) )
+	if( err = ioctl(*fd, TUNSETPERSIST, 1) )
 		{
 		close(*fd);
 		return	$LOG(STS$K_ERROR, "ioctl(TUNSETPERSIST)->%d, errno=%d", err, errno);
 		}
-
 
 	/* Set initial state of the TUN - DOWN ... */
 	if ( 0 > (sd = socket(AF_INET, SOCK_DGRAM, 0)) )
@@ -1061,6 +1063,51 @@ struct sockaddr_in inaddr = {0};
 
 	return	STS$K_SUCCESS;
 }
+
+
+
+static	int	tun_shut	(
+				)
+{
+struct ifreq ifr = {0};
+int	err, sd = -1, fd = -1;
+
+	/* Flags: IFF_TUN   - TUN device (no Ethernet headers)
+	*        IFF_TAP   - TAP device
+	*
+	*        IFF_NO_PI - Do not provide packet information
+	*        IFF_MULTI_QUEUE - Create a queue of multiqueue device
+	*/
+	ifr.ifr_flags = g_tunflags  /*IFF_TAP*/ | IFF_NO_PI | IFF_MULTI_QUEUE;
+	strncpy(ifr.ifr_name, $ASCPTR(&g_tun), IFNAMSIZ);
+
+	/* Allocate new /devtunX ... */
+	if ( 0 > (fd = open("/dev/net/tun", O_RDWR)) )
+		return	$LOG(STS$K_ERROR, "open(/dev/net/tun), errno=%d", errno);
+
+
+	/* Disable persistence for the TUN device */
+	if( err = ioctl(fd, TUNSETPERSIST, 0) )
+		$LOG(STS$K_ERROR, "ioctl(TUNSETPERSIST)->%d, errno=%d", err, errno);
+
+	/* Set initial state of the TUN - DOWN ... */
+	if ( 0 > (sd = socket(AF_INET, SOCK_DGRAM, 0)) )
+		$LOG(STS$K_FATAL, "socket(), errno=%d", errno);
+	else if( err = ioctl(sd, SIOCGIFFLAGS, &ifr) )
+		$LOG(STS$K_ERROR, "ioctl(%s, SIOCGIFFLAGS)->%d, errno=%d", ifr.ifr_name, err,  errno);
+	else	{
+		ifr.ifr_ifru.ifru_flags &= (~IFF_UP);
+
+		if ( err = ioctl(sd, SIOCSIFFLAGS, &ifr) )
+			$LOG(STS$K_ERROR, "ioctl(SIOCSIFFLAGS)->%d", err, errno);
+		}
+
+	close(sd);
+	close(fd);
+
+	return	STS$K_SUCCESS;
+}
+
 
 
 
@@ -1345,9 +1392,14 @@ static	void	sig_handler (int signo)
 		fflush(stdout);
 		_exit(signo);
 		}
-	else if ( signo == SIGUSR2 )
-			atomic_flag_clear (&reset_by_external_flag);
-	else if ( (signo == SIGTERM) || (signo == SIGINT) )
+
+	if ( signo == SIGUSR2 )
+		{
+		atomic_flag_clear (&reset_by_external_flag);
+		return;
+		}
+
+	if ( (signo == SIGTERM) || (signo == SIGINT) )
 		{
 	#ifdef WIN32
 		fprintf(stdout, "Get the %d/%#x signal, set exit_flag!\n", signo, signo);
@@ -1373,7 +1425,7 @@ static	void	sig_handler (int signo)
 
 static	void	init_sig_handler(void)
 {
-const int siglist [] = {SIGTERM, SIGINT, 0 };
+const int siglist [] = {SIGTERM, SIGINT, SIGUSR2, 0 /* 0 - EOL*/ };
 int	i;
 
 	atomic_flag_clear (&reset_by_external_flag);
@@ -1479,12 +1531,15 @@ struct	sockaddr_in rsock = {0};
 char	buf [SVPN$SZ_IOBUF];
 SVPN_PDU *pdu = (SVPN_PDU *) buf;
 struct	timespec now = {0}, etime = {0}, delta = {13, 0};
-struct iphdr *iph = (struct iphdr *) &buf [ ETHER_HDR_LEN ];
-struct tcphdr *tcph;
+struct iphdr *iph;
+
+	/* Place of the IP's Header in the network packet depending on TUN's mode */
+	iph = g_tunflags & IFF_TAP ? &buf[ETH_HLEN] : buf;
+
 
 	/* Open channel to TUN device */
 	if ( !(1 & (rc = tun_open(&td))) )
-		return	g_exit_flag = $LOG(STS$K_ERROR, "Error allocating TUN device");
+		return	g_exit_flag = $LOG(STS$K_ERROR, "Error open a channell to TUN device");
 
 	/* We suppose to be use poll() on the TUN and UDP channels to performs
 	 * I/O asyncronously
@@ -1601,14 +1656,6 @@ struct tcphdr *tcph;
 			if ( g_enc != SVPN$K_ENC_NONE )
 				decode(g_enc, buf, rc, g_key, sizeof(g_key));
 
-			if ( iph->protocol == IPPROTO_TCP )
-				{
-				tcph = (struct tcphdr *) &buf [iph->ihl*4];
-
-				$IFTRACE(g_trace, "NET [IP.ID=%05.5u]     ->       TUN %d octets", ntohs(iph->id), rc);
-				}
-
-
 			if ( rc != write(td, buf, rc) )
 				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on TUN device, write(%d octets), errno=%d", td, g_udp_sd, rc, __ba_errno__);
 
@@ -1630,17 +1677,6 @@ struct tcphdr *tcph;
 		if ( (pfd[1].revents & POLLIN) && (0 < (rc = read (td, buf, sizeof(buf)))) )
 			{
 
-
-			if ( iph->protocol == IPPROTO_TCP )
-				{
-				tcph = (struct tcphdr *) &buf [iph->ihl*4];
-
-				$IFTRACE(g_trace, "NET      <-       [IP.ID=%05.5u]TUN %d octets", ntohs(iph->id), rc);
-				}
-
-
-
-
 			slen = sizeof(struct sockaddr_in);
 
 			atomic_fetch_add(&g_stat.btunrd, rc);
@@ -1648,8 +1684,10 @@ struct tcphdr *tcph;
 
 
 			/* TCP's MSS Fixup */
-			if ( g_mss )
-				mss_fixup (buf, rc, g_mss);
+			if ( g_mss && (iph->protocol == IPPROTO_TCP) )
+				{
+				mss_fixup (iph, g_tunflags & IFF_TAP ?  rc - ETHER_HDR_LEN : rc , g_mss);
+				}
 
 			if ( g_enc != SVPN$K_ENC_NONE )
 				encode(g_enc, buf, rc, g_key, sizeof(g_key));
@@ -2025,7 +2063,10 @@ struct timespec deltaonline = {0, 0}, now;
 
 	/* Open channel to TUN device */
 	if ( !(1 & (status = tun_init(&g_tun_fd))) )
+		{
+		tun_shut();
 		return	g_exit_flag = $LOG(STS$K_ERROR, "Error allocating TUN device");
+		}
 
 	close(g_tun_fd);
 
@@ -2189,6 +2230,7 @@ struct timespec deltaonline = {0, 0}, now;
 		}
 
 	set_tun_state(0);		/* Down the tunX */
+	tun_shut();
 	exec_script(&g_linkdown);	/* Switch /dev/tunX DOWN */
 	stat_write();			/* Write session statistic record */
 
