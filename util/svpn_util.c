@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPUTL"
-#define	__IDENT__	"X.00-02"
-#define	__REV__		"0.0.02"
+#define	__IDENT__	"X.00-03"
+#define	__REV__		"0.0.03"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -28,6 +28,7 @@
 **						M[onthly]
 **						D[aily]
 **						H[ourly]
+**			/SINCE=<datetime>
 **
 **
 **  AUTHORS: Ruslan R. (The BadAss SysMan) Laishev
@@ -36,7 +37,9 @@
 **
 **  MODIFICATION HISTORY:
 **
-**	24-OCT-2019	RRL	Implement SHOW=LIVE
+**	24-OCT-2019	RRL	Implement /SHOW=LIVE
+**
+**	16-JAN-2020	RRL	X.00-03 : Added /SINCE=<YYYY[-MM[-DD]] to select a start period of files to be scanned
 **
 **--
 */
@@ -171,11 +174,12 @@ static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
 	g_trace = 0,			/* A flag to produce extensible logging	*/
 	g_lenbacklog = 5;
 
-ASC	g_confspec = {0},
-	g_fstat = {0}, g_dstat = {0},
-	g_ipbacklog = {0},
-	g_show = {0},
-	g_tun = {$ASCINI("tunX:")};	/* OS specific TUN device name		*/
+ASC	q_confspec = {0},
+	q_fstat = {0}, g_dstat = {0},
+	q_ipbacklog = {0},		/* Fspec of the IP backlog file		*/
+	q_show = {0},			/* Value of the /SHOW qualifier		*/
+	q_tun = {$ASCINI("tunX:")},	/* OS specific TUN device name		*/
+	q_since = {0};			/* Value of /SINCE qualifier		*/
 
 typedef struct	__svpn_stat
 	{
@@ -191,15 +195,17 @@ typedef struct	__svpn_stat
 		pnetwr;
 } SVPN_STAT;
 
+struct tm	g_since = {0};		/* To accept a start period of stat	*/
 
-const OPTS optstbl [] =		/* Configuration options		*/
+const OPTS optstbl [] =			/* Configuration options		*/
 {
-	{$ASCINI("config"),	&g_confspec, ASC$K_SZ,	OPTS$K_CONF},
+	{$ASCINI("config"),	&q_confspec, ASC$K_SZ,	OPTS$K_CONF},
 	{$ASCINI("trace"),	&g_trace, 0,		OPTS$K_OPT},
-	{$ASCINI("stat"),	&g_fstat, ASC$K_SZ,	OPTS$K_STR},
-	{$ASCINI("ipbacklog"),	&g_ipbacklog, ASC$K_SZ,	OPTS$K_STR},
-	{$ASCINI("show"),	&g_show, ASC$K_SZ,	OPTS$K_STR},
-	{$ASCINI("devtun"),	&g_tun, ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("stat"),	&q_fstat, ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("ipbacklog"),	&q_ipbacklog, ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("show"),	&q_show, ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("devtun"),	&q_tun, ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("since"),	&q_since, ASC$K_SZ,	OPTS$K_STR},
 
 	OPTS_NULL
 };
@@ -210,13 +216,14 @@ const char	help [] = { "Usage:\n" \
 		"\t/CONFIG=<file>    configuration options file path\n" \
 		"\t/TRACE            enable extensible diagnostic output\n" \
 		"\t/SHOW=<statkwd>   show statistic\n" \
+		"\t/SINCE=YYYY[-MM[-DD]]   show statistic\n" \
 		"\t\tstatkwd:	L[ive]\n" \
 		"\t\t           I[PBacklog]\n" \
 		"\t\t           Y[year]\n" \
 		"\t\t           M[onthly]\n" \
 		"\t\t           D[aily]\n" \
 		"\t\t           H[ourly]\n" \
-		"\n\tExample of usage:\n\t $ %s -config=svpn_server.conf /show=backlog\n" };
+		"\n\tExample of usage:\n\t $ %s -config=svpn_server.conf /show=backlog /since=2019\n" };
 
 
 /*
@@ -244,15 +251,15 @@ struct in_addr iparr [SVPN$SZ_MAXIPBLOG] = {0};
 char	ipbuf[32];
 
 
-	if ( !$ASCLEN(&g_ipbacklog) )
+	if ( !$ASCLEN(&q_ipbacklog) )
 		return	$LOG(STS$K_ERROR, "No IP Backlog file has been specified");
 
-	if ( 0 > (fd = open($ASCPTR(&g_ipbacklog), O_RDONLY)) )
-		return	$LOG(STS$K_ERROR, "IP Backlog file open(%s), errno=%d", $ASCPTR(&g_ipbacklog), errno);
+	if ( 0 > (fd = open($ASCPTR(&q_ipbacklog), O_RDONLY)) )
+		return	$LOG(STS$K_ERROR, "IP Backlog file open(%s), errno=%d", $ASCPTR(&q_ipbacklog), errno);
 
 
 	if ( 0 > (status = read(fd, iparr, sizeof(iparr))) )
-		status = $LOG(STS$K_ERROR, "IP Backlog file read(%s), errno=%d", $ASCPTR(&g_ipbacklog), errno);
+		status = $LOG(STS$K_ERROR, "IP Backlog file read(%s), errno=%d", $ASCPTR(&q_ipbacklog), errno);
 
 	else	status = STS$K_SUCCESS;
 
@@ -276,22 +283,33 @@ static	int	config_process	(int argc, char **argv)
 {
 int	status = STS$K_SUCCESS, bits;
 char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64], fspec[255];
-ASC	l_fstat = g_fstat;
+ASC	l_fstat = q_fstat;
 
-	if ( $ASCLEN(&g_ipbacklog) )
+	if ( $ASCLEN(&q_ipbacklog) )
 		{
-		sscanf($ASCPTR(&g_ipbacklog), "%[^,\n],%[^\n]" , fspec, mask);
-		__util$str2asc (fspec, &g_ipbacklog);
+		sscanf($ASCPTR(&q_ipbacklog), "%[^,\n],%[^\n]" , fspec, mask);
+		__util$str2asc (fspec, &q_ipbacklog);
 
 		g_lenbacklog = atoi(mask);
 
-		$IFTRACE(g_trace, "IPBACKLOG=%.*s, LENIPBACKLOG=%d", $ASC(&g_ipbacklog), g_lenbacklog);
+		$IFTRACE(g_trace, "IPBACKLOG=%.*s, LENIPBACKLOG=%d", $ASC(&q_ipbacklog), g_lenbacklog);
 		}
 
 	if ( !$ASCLEN(&l_fstat) || !(cp = dirname($ASCPTR(&l_fstat))) )
 		cp = dirname(argv[0]);
 
 	__util$str2asc (cp, &g_dstat);
+
+
+	/* Compute a start period of scanning file for generation of report */
+	__util$timbuf (NULL, &g_since); /* Default */
+
+	if ( $ASCLEN(&q_since) )
+		sscanf($ASCPTR(&q_since), "%d", &g_since.tm_year);
+
+	$IFTRACE(g_trace, "SINCE=%d", g_since.tm_year);
+
+
 
 	return	STS$K_SUCCESS;
 }
@@ -330,7 +348,7 @@ static char	fspec[NAME_MAX];
 			return	$LOG(STS$K_FATAL, "Opening directory '%s', errno=%d", $ASCPTR(&g_dstat), errno);
 		}
 
-	/* If there is no open file - get next directory's entry - check for pattern, open for reading. */
+	/* If there is no has been opened file - get next directory's entry, check against pattern, open for reading. */
 	if ( 0 > fd )
 		{
 		while ( dent = readdir(dir) )
@@ -450,7 +468,6 @@ char	sname[MAXNAMLEN] = {0}, buf1[128] = {0}, buf2[128] = {0}, buf3[128] = {0}, 
 SVPN_STAT strec = {0};
 SVPN_VSTAT vstat = {0};
 unsigned long long	nsnd, nrcv, tsnd, trcv;
-struct tm now;
 
 	/* Sanity check */
 	what = what ? what : "l";
@@ -464,12 +481,12 @@ struct tm now;
 	if ( *what == 'l' )		/* Live statistic	*/
 		{
 		/* FIFO channel to put statistic vector */
-		snprintf(sname, sizeof(sname) - 1, "/tmp/svpn-%.*s", $ASC(&g_tun));
+		snprintf(sname, sizeof(sname) - 1, "/tmp/svpn-%.*s", $ASC(&q_tun));
 
 		if ( 0 > (fd = open(sname, O_RDONLY /* O_NONBLOCK*/ )) )
 			return	$LOG(STS$K_ERROR, "open(%s), errno=%d", sname, errno);
 
-		$LOG(STS$K_INFO, " ---- Live stat for %.*s----", $ASC(&g_tun));
+		$LOG(STS$K_INFO, " ---- Live stat for %.*s----", $ASC(&q_tun));
 
 		while ( 0 < (status = read(fd, &vstat, sizeof(SVPN_VSTAT))) )
 			{
@@ -481,7 +498,7 @@ struct tm now;
 			__fao_traffic (vstat.pnetwr/vstat.delta.tv_sec, buf4, sizeof(buf3), unit_packets);
 
 			$LOG(STS$K_INFO, "%.*s   BW(Bps) Rx: %s/s Tx: %s/s, BW(pps) Rx: %s/s Tx: %s/s, RTT: %d nsecs",
-				$ASC(&g_tun), buf1, buf2, buf3, buf4, vstat.rtt.tv_nsec);
+				$ASC(&q_tun), buf1, buf2, buf3, buf4, vstat.rtt.tv_nsec);
 			}
 
 		close (fd);
@@ -490,10 +507,10 @@ struct tm now;
 
 
 	/* Prepare file mask to matching */
-	__util$timbuf (NULL, &now);
-	cp = basename( $ASCPTR(&g_fstat) );
+	cp = basename( $ASCPTR(&q_fstat) );	/* Get filename from the filespec */
 
-	snprintf(sname, sizeof(sname) - 1, "%s-%04d-%%%%", cp ? cp : "*", now.tm_year);
+						/* Add Year suffixs if need */
+	snprintf(sname, sizeof(sname) - 1, "%s-%04d-%%%%", cp ? cp : "*", g_since.tm_year);
 
 
 	switch (*what)
@@ -501,11 +518,11 @@ struct tm now;
 		case	'h':	/* from begin of day	*/
 
 
-			$LOG(STS$K_INFO, " ---- Hourly stat for %.*s ----", $ASC(&g_tun));
+			$LOG(STS$K_INFO, " ---- Hourly stat for %.*s ----", $ASC(&q_tun));
 
 			for ( hh = nsnd = nrcv = tsnd = trcv = 0;  1 & (status = stat_read_rec(sname, &strec)); )
 				{
-				if ( (now.tm_mday != strec.ts.tm_mday) || (now.tm_mon != strec.ts.tm_mon) )
+				if ( (g_since.tm_mday != strec.ts.tm_mday) || (g_since.tm_mon != strec.ts.tm_mon) )
 					continue;
 
 				if ( hh != strec.ts.tm_hour )
@@ -546,11 +563,11 @@ struct tm now;
 			break;
 
 		case	'd':	/* from begin of month	*/
-			$LOG(STS$K_INFO, " ---- Daily stat for %.*s----", $ASC(&g_tun));
+			$LOG(STS$K_INFO, " ---- Daily stat for %.*s----", $ASC(&q_tun));
 
 			for ( dd = 1, nsnd = nrcv = tsnd = trcv = 0; 1 & (status = stat_read_rec(sname, &strec)); )
 				{
-				if ( (now.tm_mon != strec.ts.tm_mon) )
+				if ( (g_since.tm_mon != strec.ts.tm_mon) )
 					continue;
 
 				if ( dd != strec.ts.tm_mday )
@@ -592,7 +609,7 @@ struct tm now;
 			break;
 
 		case	'm':	/* from begin of year	*/
-			$LOG(STS$K_INFO, " ---- Monthly for %.*s ----", $ASC(&g_tun));
+			$LOG(STS$K_INFO, " ---- Monthly for %.*s ----", $ASC(&q_tun));
 
 			for ( mm = 1, nsnd = nrcv = tsnd = trcv = 0; 1 & (status = stat_read_rec(sname, &strec)); )
 				{
@@ -633,7 +650,7 @@ struct tm now;
 			break;
 
 		case	'y':	/* --//--	year	*/
-			$LOG(STS$K_INFO, " ---- Year stat for %.*s ----", $ASC(&g_tun));
+			$LOG(STS$K_INFO, " ---- Year stat for %.*s ----", $ASC(&q_tun));
 
 			for ( nsnd = nrcv = tsnd = trcv = 0; 1 & (status = stat_read_rec(sname, &strec)); )
 				{
@@ -702,8 +719,10 @@ struct timespec deltaonline = {0, 0}, now;
 	/* Additionaly parse and validate configuration options  */
 	config_process(argc, argv);
 
-	if ( $ASCLEN(&g_show) )
-		stat_show ( $ASCPTR(&g_show) );
+
+	/* So , check that /SHOW is take place and dispatch execution to main routine */
+	if ( $ASCLEN(&q_show) )
+		stat_show ( $ASCPTR(&q_show) );
 
 
 	return	STS$K_SUCCESS;
