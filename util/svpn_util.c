@@ -9,7 +9,6 @@
 	#pragma	GCC diagnostic ignored	"-Wdiscarded-qualifiers"
 #endif
 
-
 /*++
 **
 **  FACILITY:  StarLet VPN - cross-platform VPN, light weight, high performance
@@ -53,9 +52,6 @@
 #include	<signal.h>
 #include	<libgen.h>
 
-#include	"sha1.h"
-
-
 #ifdef _WIN32
 	#pragma once
 	#define WIN32_LEAN_AND_MEAN             /* Exclude rarely-used stuff from Windows headers */
@@ -90,7 +86,6 @@
 #include	<netdb.h>
 #include	<fcntl.h>
 #include	<linux/limits.h>
-#include	<stdatomic.h>
 #include	<sys/types.h>
 #include	<dirent.h>
 #endif
