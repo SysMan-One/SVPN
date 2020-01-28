@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPUTL"
-#define	__IDENT__	"X.00-03"
-#define	__REV__		"0.0.03"
+#define	__IDENT__	"X.00-04"
+#define	__REV__		"0.04.0"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -39,6 +39,8 @@
 **	24-OCT-2019	RRL	Implement /SHOW=LIVE
 **
 **	16-JAN-2020	RRL	X.00-03 : Added /SINCE=<YYYY[-MM[-DD]] to select a start period of files to be scanned
+**
+**	28-JAN-2020	RRL	X.00-04 : Refactoring stat_read_rec() according of changes of record structure.
 **
 **--
 */
@@ -176,18 +178,20 @@ ASC	q_confspec = {0},
 	q_tun = {$ASCINI("tunX:")},	/* OS specific TUN device name		*/
 	q_since = {0};			/* Value of /SINCE qualifier		*/
 
-typedef struct	__svpn_stat
+typedef struct	__svpn_stat__
 	{
-	struct	tm	ts;
 	unsigned long long
 		btunrd,			/* Octets counters	*/
 		btunwr,
 		bnetrd,
 		bnetwr,
+
 		ptunrd,			/* Packets counters	*/
 		ptunwr,
 		pnetrd,
 		pnetwr;
+
+	struct  timespec ts;
 } SVPN_STAT;
 
 struct tm	g_since = {0};		/* To accept a start period of stat	*/
@@ -327,13 +331,17 @@ ASC	l_fstat = q_fstat;
  */
 int	stat_read_rec	(
 		char		*fmask,
-		SVPN_STAT	*strec
+		SVPN_STAT	*strec,
+		struct tm	*tmrec
 			)
 {
-static	int status, fd = -1;
+static	int fd = -1;
 static	DIR *dir = NULL;
 struct  dirent *dent = NULL;
 static char	fspec[NAME_MAX];
+struct iovec iov [] = { {tmrec, sizeof(struct	tm)}, {strec, sizeof(SVPN_STAT)} };
+int	status, iovlen = sizeof(struct tm) + sizeof(SVPN_STAT);
+
 
 	/* At first call we need to open directory to be scanned for .stat files */
 	if ( !dir )
@@ -358,7 +366,7 @@ static char	fspec[NAME_MAX];
 
 				if ( 0 < (fd = open(fspec, O_RDONLY, 0)) )
 					{
-					//$IFTRACE(g_trace, "Process file: %s ...", fspec);
+					$IFTRACE(g_trace, "Process file: %s ...", fspec);
 					break; /* Success! Out from loop */
 					}
 
@@ -379,19 +387,19 @@ static char	fspec[NAME_MAX];
 	if ( fd < 0 )
 		return	STS$K_WARN; //$LOG(STS$K_WARN, "No more files");
 
-	if ( !(status = read (fd, strec, sizeof(SVPN_STAT))) )
+	if ( !(status = readv (fd, iov, $ARRSZ(iov))) )
 		{
 		/* 0 - EOF, close current file, set fd to -1 */
 		close(fd );
 		fd = -1;
 
-		return	stat_read_rec (fmask, strec);
+		return	stat_read_rec (fmask, strec, tmrec);
 		}
 	else if ( status < 0 )
 		return	$LOG(STS$K_FATAL, "Error reading file '%s', errno=%d", fspec, errno);
 
 
-	//$IFTRACE(g_trace, "Read %d octets from '%s', HH:%02d", status, fspec, strec->ts.tm_hour);
+	//$IFTRACE(g_trace, "Read %d octets from '%s', HH:%02d", status, fspec, tmrec->tm_hour);
 
 	/* Success! */
 	return	STS$K_SUCCESS;
@@ -463,6 +471,7 @@ char	sname[MAXNAMLEN] = {0}, buf1[128] = {0}, buf2[128] = {0}, buf3[128] = {0}, 
 SVPN_STAT strec = {0};
 SVPN_VSTAT vstat = {0};
 unsigned long long	nsnd, nrcv, tsnd, trcv;
+struct tm tmrec = {0};
 
 	/* Sanity check */
 	what = what ? what : "l";
@@ -485,7 +494,7 @@ unsigned long long	nsnd, nrcv, tsnd, trcv;
 
 		while ( 0 < (status = read(fd, &vstat, sizeof(SVPN_VSTAT))) )
 			{
-			$DUMPHEX(&vstat, status);
+			//$DUMPHEX(&vstat, status);
 			__fao_traffic (vstat.bnetrd/vstat.delta.tv_sec, buf1, sizeof(buf1), unit_octets);
 			__fao_traffic (vstat.bnetwr/vstat.delta.tv_sec, buf2, sizeof(buf2), unit_octets);
 
@@ -515,12 +524,12 @@ unsigned long long	nsnd, nrcv, tsnd, trcv;
 
 			$LOG(STS$K_INFO, " ---- Hourly stat for %.*s ----", $ASC(&q_tun));
 
-			for ( hh = nsnd = nrcv = tsnd = trcv = 0;  1 & (status = stat_read_rec(sname, &strec)); )
+			for ( hh = nsnd = nrcv = tsnd = trcv = 0;  1 & (status = stat_read_rec(sname, &strec, &tmrec)); )
 				{
-				if ( (g_since.tm_mday != strec.ts.tm_mday) || (g_since.tm_mon != strec.ts.tm_mon) )
+				if ( (g_since.tm_mday != tmrec.tm_mday) || (g_since.tm_mon != tmrec.tm_mon) )
 					continue;
 
-				if ( hh != strec.ts.tm_hour )
+				if ( hh != tmrec.tm_hour )
 					{
 					__fao_traffic (nrcv, buf1, sizeof(buf1), unit_octets);
 					__fao_traffic (nsnd, buf2, sizeof(buf2), unit_octets);
@@ -530,7 +539,7 @@ unsigned long long	nsnd, nrcv, tsnd, trcv;
 					$LOG(STS$K_INFO, "%02d:00  --  NET Rx: %s   Tx: %s, TAP Rx: %s   Tx: %s", hh, buf1, buf2, buf3, buf4);
 
 					/* Switch to next hour, reset local counters */
-					hh = strec.ts.tm_hour;
+					hh = tmrec.tm_hour;
 					nsnd	= strec.bnetwr;
 					nrcv	= strec.bnetrd;
 					tsnd	= strec.btunwr;
@@ -560,22 +569,22 @@ unsigned long long	nsnd, nrcv, tsnd, trcv;
 		case	'd':	/* from begin of month	*/
 			$LOG(STS$K_INFO, " ---- Daily stat for %.*s----", $ASC(&q_tun));
 
-			for ( dd = 1, nsnd = nrcv = tsnd = trcv = 0; 1 & (status = stat_read_rec(sname, &strec)); )
+			for ( dd = 1, nsnd = nrcv = tsnd = trcv = 0; 1 & (status = stat_read_rec(sname, &strec, &tmrec)); )
 				{
-				if ( (g_since.tm_mon != strec.ts.tm_mon) )
+				if ( (g_since.tm_mon != tmrec.tm_mon) )
 					continue;
 
-				if ( dd != strec.ts.tm_mday )
+				if ( dd != tmrec.tm_mday )
 					{
 					__fao_traffic (nrcv, buf1, sizeof(buf1), unit_octets);
 					__fao_traffic (nsnd, buf2, sizeof(buf2), unit_octets);
 					__fao_traffic (trcv, buf3, sizeof(buf3), unit_octets);
 					__fao_traffic (tsnd, buf4, sizeof(buf4), unit_octets);
 
-					$LOG(STS$K_INFO, "%02d-%02d  --  NET Rx: %s   Tx: %s, TAP Rx: %s   Tx: %s", dd, strec.ts.tm_mon, buf1, buf2, buf3, buf4);
+					$LOG(STS$K_INFO, "%02d-%02d  --  NET Rx: %s   Tx: %s, TAP Rx: %s   Tx: %s", dd, tmrec.tm_mon, buf1, buf2, buf3, buf4);
 
 					/* Switch to next day, reset local counters */
-					dd = strec.ts.tm_mday;
+					dd = tmrec.tm_mday;
 					nsnd	= strec.bnetwr;
 					nrcv	= strec.bnetrd;
 					tsnd	= strec.btunwr;
@@ -598,7 +607,7 @@ unsigned long long	nsnd, nrcv, tsnd, trcv;
 				__fao_traffic (trcv, buf3, sizeof(buf3), unit_octets);
 				__fao_traffic (tsnd, buf4, sizeof(buf4), unit_octets);
 
-				$LOG(STS$K_INFO, "%02d-%02d  --  NET Rx: %s   Tx: %s, TAP Rx: %s   Tx: %s", dd, strec.ts.tm_mon, buf1, buf2, buf3, buf4);
+				$LOG(STS$K_INFO, "%02d-%02d  --  NET Rx: %s   Tx: %s, TAP Rx: %s   Tx: %s", dd, tmrec.tm_mon, buf1, buf2, buf3, buf4);
 				}
 
 			break;
@@ -606,19 +615,19 @@ unsigned long long	nsnd, nrcv, tsnd, trcv;
 		case	'm':	/* from begin of year	*/
 			$LOG(STS$K_INFO, " ---- Monthly for %.*s ----", $ASC(&q_tun));
 
-			for ( mm = 1, nsnd = nrcv = tsnd = trcv = 0; 1 & (status = stat_read_rec(sname, &strec)); )
+			for ( mm = 1, nsnd = nrcv = tsnd = trcv = 0; 1 & (status = stat_read_rec(sname, &strec, &tmrec)); )
 				{
-				if ( mm != strec.ts.tm_mon )
+				if ( mm != tmrec.tm_mon )
 					{
 					__fao_traffic (nrcv, buf1, sizeof(buf1), unit_octets);
 					__fao_traffic (nsnd, buf2, sizeof(buf2), unit_octets);
 					__fao_traffic (trcv, buf3, sizeof(buf3), unit_octets);
 					__fao_traffic (tsnd, buf4, sizeof(buf4), unit_octets);
 
-					$LOG(STS$K_INFO, "%02d-%04d  --  NET Rx: %s   Tx: %s, TAP Rx: %s   Tx: %s", mm, strec.ts.tm_year, buf1, buf2, buf3, buf4);
+					$LOG(STS$K_INFO, "%02d-%04d  --  NET Rx: %s   Tx: %s, TAP Rx: %s   Tx: %s", mm, tmrec.tm_year, buf1, buf2, buf3, buf4);
 
 					/* Switch to next day, reset local counters */
-					mm = strec.ts.tm_mon;
+					mm = tmrec.tm_mon;
 					nsnd	= strec.bnetwr;
 					nrcv	= strec.bnetrd;
 					tsnd	= strec.btunwr;
@@ -639,7 +648,7 @@ unsigned long long	nsnd, nrcv, tsnd, trcv;
 				__fao_traffic (trcv, buf3, sizeof(buf3), unit_octets);
 				__fao_traffic (tsnd, buf4, sizeof(buf4), unit_octets);
 
-				$LOG(STS$K_INFO, "%02d-%04d  --  NET Rx: %s   Tx: %s, TAP Rx: %s   Tx: %s", mm, strec.ts.tm_year, buf1, buf2, buf3, buf4);
+				$LOG(STS$K_INFO, "%02d-%04d  --  NET Rx: %s   Tx: %s, TAP Rx: %s   Tx: %s", mm, tmrec.tm_year, buf1, buf2, buf3, buf4);
 				}
 
 			break;
@@ -647,7 +656,7 @@ unsigned long long	nsnd, nrcv, tsnd, trcv;
 		case	'y':	/* --//--	year	*/
 			$LOG(STS$K_INFO, " ---- Year stat for %.*s ----", $ASC(&q_tun));
 
-			for ( nsnd = nrcv = tsnd = trcv = 0; 1 & (status = stat_read_rec(sname, &strec)); )
+			for ( nsnd = nrcv = tsnd = trcv = 0; 1 & (status = stat_read_rec(sname, &strec, &tmrec)); )
 				{
 				nsnd	+= strec.bnetwr;
 				nrcv	+= strec.bnetrd;
@@ -660,7 +669,7 @@ unsigned long long	nsnd, nrcv, tsnd, trcv;
 			__fao_traffic (strec.btunrd, buf3, sizeof(buf3), unit_octets);
 			__fao_traffic (strec.btunwr, buf4, sizeof(buf4), unit_octets);
 
-			$LOG(STS$K_INFO, " %04d  --  NET Rx: %s   Tx: %s, TAP Rx: %s   Tx: %s", strec.ts.tm_year, buf1, buf2, buf3, buf4);
+			$LOG(STS$K_INFO, " %04d  --  NET Rx: %s   Tx: %s, TAP Rx: %s   Tx: %s", tmrec.tm_year, buf1, buf2, buf3, buf4);
 			break;
 
 		default:
