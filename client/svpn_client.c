@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNCLNT"
 #define	__IDENT__	"X.00-09"
-#define	__REV__		"0.0.09"
+#define	__REV__		"0.09.0"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -149,15 +149,11 @@
 #include	"utility_routines.h"
 #include	"svpn_defs.h"
 
-
-
 #ifdef WIN32
 #define	__ba_errno__	WSAGetLastError()
 #else
 #define	__ba_errno__	errno
 #endif // WIN32
-
-
 
 #ifdef	WIN32
 #if	(_M_X64)
@@ -201,7 +197,6 @@
 
     #define __ARCH__NAME__ ABI
 #endif
-
 
 #ifndef __ARCH__NAME__
 	#define	__ARCH__NAME__	"VAX-11"
@@ -281,7 +276,6 @@ const OPTS optstbl [] =		/* Configuration options		*/
 
 	OPTS_NULL
 };
-
 
 
 const char	help [] = { "Usage:\n" \
