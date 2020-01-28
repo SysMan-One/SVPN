@@ -21,6 +21,7 @@
 **--
 */
 
+#include	<endian.h>
 #include	"svpn_defs.h"
 
 extern	int	g_trace;

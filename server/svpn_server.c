@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNSRV"
-#define	__IDENT__	"X.00-14ECO2"
-#define	__REV__		"0.0.14"
+#define	__IDENT__	"X.00-14ECO5"
+#define	__REV__		"0.14.5"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -96,6 +96,11 @@
 **
 **	24-NOV-2019	RRL	X.00-14ECO1 : Fixed bug in RTT computation has implied bu bug in the __util$sub_time()
 **				X.00-14ECO2 : fixed exiting by incorrect handling SIGUSR2.
+**
+**	25-JAN-2020	RRL	X.00-14ECO3 : Added some more diagnostic into the stat_write();
+**				changed __REV__ format to count ECO.
+**
+**	27-JAN-2020	RRL	X.00-14ECO4 : Write stat record at interval basis (deltaonline).
 **--
 */
 
@@ -275,7 +280,7 @@ ASC	g_tun = {$ASCINI("tunX:")},	/* OS specific TUN device name		*/
 	g_timers = {$ASCINI("7, 120, 13")},
 	g_keepalive = {$ASCINI("3, 3")},
 	g_climsg = {0}, g_linkup = {0}, g_linkdown = {0},
-	g_fstat = {0},
+	q_fstat = {0},
 	g_ipbacklog = {0},
 	g_fifo = {0},			/* FIFO spec to interchange by counters		*/
 	g_volume = {0},			/* File to keep a traficc voulme for the tunnel	*/
@@ -357,7 +362,7 @@ const OPTS optstbl [] =		/* Configuration options		*/
 	{$ASCINI("MTU"),	&g_mtu,	0,		OPTS$K_INT},
 	{$ASCINI("MSS"),	&g_mss,	0,		OPTS$K_INT},
 	{$ASCINI("deltaonline"),&g_deltaonline,	0,	OPTS$K_INT},
-	{$ASCINI("stat"),	&g_fstat,ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("stat"),	&q_fstat,ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("ipbacklog"),	&g_ipbacklog,ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("data_volume_limit"),	&g_data_volume_limit, 0,		OPTS$K_INT},
 	{$ASCINI("modetun"),	&g_tunmode,ASC$K_SZ,	OPTS$K_STR},
@@ -544,13 +549,17 @@ char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64], fspec[255];
 	else	$LOG(STS$K_SUCCESS, "FIFO device '%.*s' has been created", $ASC(&g_fifo));
 
 	/* Make file name for tunnel volume of traffic */
-	if ( $ASCLEN(&g_fstat) )
+	if ( $ASCLEN(&q_fstat) )
 		{
-		/* Volume Data is in Gbytes */
+		char fn[256] = {0};
+
+		/* Set limit Volume Data is in Gbytes to very big value */
 		g_data_volume_limit *= 1024*1024*1024;
 
+		/* Make a copy of the string to exclude modufication of the original value */
+		strncpy(fn, $ASCPTR(&q_fstat), $MIN(ASC$K_SZ, sizeof(fn) - 1));
 
-		if ( !(cp = dirname( $ASCPTR(&g_fstat))) )
+		if ( !(cp = dirname( fn)) )
 			cp = "./";
 
 		$ASCLEN(&g_volume) = (unsigned char) snprintf($ASCPTR(&g_volume), ASC$K_SZ, "%s/volume-%.*s.dat", cp, $ASC(&g_tun));
@@ -604,7 +613,9 @@ char	fname [ NAME_MAX] = {0};
 struct iovec iov [] = { {&tmnow, sizeof(tmnow)}, {&g_stat, sizeof(g_stat)} };
 int	fd = -1, iovlen = sizeof(tmnow) + sizeof(g_stat);
 
-	if ( !$ASCLEN(&g_fstat) )
+	$IFTRACE(g_trace, "Stat file/path '%.*s'", $ASC(&q_fstat) );
+
+	if ( !$ASCLEN(&q_fstat) )
 		return	STS$K_SUCCESS;
 
 	/* Generate a final file specification by adding year and month at end of file specification from configuration option:
@@ -614,7 +625,9 @@ int	fd = -1, iovlen = sizeof(tmnow) + sizeof(g_stat);
 	 *	./tmp/starlet-zilla/tun135.stat-2019-01
 	 */
 	__util$timbuf(NULL, &tmnow);
-	sprintf(fname, "%.*s-%04d-%02d", $ASC(&g_fstat), tmnow.tm_year, tmnow.tm_mon);
+	sprintf(fname, "%.*s-%04d-%02d", $ASC(&q_fstat), tmnow.tm_year, tmnow.tm_mon);
+
+	$IFTRACE(g_trace, "Writting statistic to '%s'", fname );
 
 	if ( 0 > (fd = open (fname, O_CREAT | O_WRONLY | O_APPEND, f_mode)) )
 		return	$LOG(STS$K_ERROR, "open(%s)->%d, errno=%d", fname, fd, errno);
@@ -625,6 +638,8 @@ int	fd = -1, iovlen = sizeof(tmnow) + sizeof(g_stat);
 		return	$LOG(STS$K_ERROR, "Statistic write error, writev(%s, %d octets), errno=%d", fname, iovlen, errno);
 
 	close(fd);
+
+	$IFTRACE(g_trace, "Statistic (%d octets) has been saved '%s'", iovlen, fname );
 
 	return	STS$K_SUCCESS;
 }
@@ -656,13 +671,16 @@ SVPN_VSTAT vstat = {0};
 	g_stat_last = g_stat;
 
 	/* Open FIFO device, write stat vector record, close */
-	if ( 0 > (fd = open($ASCPTR(&g_fifo), O_WRONLY | O_NONBLOCK)) )
-		$IFTRACE(g_trace && (errno != ENXIO),  "open(%.*s), errno=%d", $ASC(&g_fifo), errno);
-	else if ( sizeof(SVPN_VSTAT) != write(fd, &vstat, sizeof(SVPN_VSTAT)) )
-		$IFTRACE(g_trace, "write(%.*s, %d octets), errno=%d", $ASC(&g_fifo), sizeof(vstat), errno);
+	if( access($ASCPTR(&g_fifo), F_OK | W_OK) )
+		{
+		if ( 0 > (fd = open($ASCPTR(&g_fifo), O_WRONLY | O_NONBLOCK)) )
+			$IFTRACE(g_trace && (errno != ENXIO),  "open(%.*s), errno=%d", $ASC(&g_fifo), errno);
+		else if ( sizeof(SVPN_VSTAT) != write(fd, &vstat, sizeof(SVPN_VSTAT)) )
+			$IFTRACE(g_trace, "write(%.*s, %d octets), errno=%d", $ASC(&g_fifo), sizeof(vstat), errno);
 
-	if ( !(fd < 0) )
-		close(fd);
+		if ( !(fd < 0) )
+			close(fd);
+		}
 
 	/* Adjust total data traffic volume */
 	g_data_volume	+= g_stat.bnetrd;
@@ -2200,6 +2218,9 @@ struct timespec deltaonline = {0, 0}, now;
 						((float) g_rtt.tv_nsec)/(1000.0*1000.0) );
 
 					__util$add_time(&now, &ts, &deltaonline);
+
+
+					stat_write();
 					}
 				}
 
