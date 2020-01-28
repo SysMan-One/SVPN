@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNSRV"
-#define	__IDENT__	"X.00-14ECO5"
-#define	__REV__		"0.14.5"
+#define	__IDENT__	"X.00-15"
+#define	__REV__		"0.15.0"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -101,6 +101,8 @@
 **				changed __REV__ format to count ECO.
 **
 **	27-JAN-2020	RRL	X.00-14ECO4 : Write stat record at interval basis (deltaonline).
+**
+**	28-JAN-2020	RRL	X.00-15 : Refactoring stat_update()
 **--
 */
 
@@ -605,18 +607,35 @@ char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64], fspec[255];
 	return	STS$K_SUCCESS;
 }
 
-
+#if	0
 int	stat_write	(void)
 {
 struct	tm	tmnow = {0};
 char	fname [ NAME_MAX] = {0};
-struct iovec iov [] = { {&tmnow, sizeof(tmnow)}, {&g_stat, sizeof(g_stat)} };
+static SVPN_STAT	lstat = {0};
+SVPN_STAT	delta_stat = {0};
+struct iovec iov [] = { {&tmnow, sizeof(tmnow)}, {&lstat, sizeof(lstat)} };
 int	fd = -1, iovlen = sizeof(tmnow) + sizeof(g_stat);
 
 	$IFTRACE(g_trace, "Stat file/path '%.*s'", $ASC(&q_fstat) );
 
 	if ( !$ASCLEN(&q_fstat) )
 		return	STS$K_SUCCESS;
+
+	/* Make a vector with differential counters */
+	__util$timbuf(NULL, &delta_stat.ts);			/* Current time stamp	*/
+
+	delta_stat.bnetrd	= g_stat.bnetrd - lstat.bnetrd;
+	delta_stat.bnetwr	= g_stat.bnetwr - lstat.bnetwr;
+	delta_stat.btunrd	= g_stat.btunrd - lstat.btunrd;
+	delta_stat.btunwr	= g_stat.btunwr - lstat.btunwr;
+
+	delta_stat.pnetrd	= g_stat.pnetrd - lstat.pnetrd;
+	delta_stat.pnetwr	= g_stat.pnetwr - lstat.pnetwr;
+	delta_stat.ptunrd	= g_stat.ptunrd - lstat.ptunrd;
+	delta_stat.ptunwr	= g_stat.ptunwr - lstat.ptunwr;
+
+	lstat = g_stat;
 
 	/* Generate a final file specification by adding year and month at end of file specification from configuration option:
 	 * e.g. :
@@ -643,44 +662,103 @@ int	fd = -1, iovlen = sizeof(tmnow) + sizeof(g_stat);
 
 	return	STS$K_SUCCESS;
 }
+#endif
+
 
 
 void	stat_update	(void)
 {
-int	fd = -1;
 SVPN_VSTAT vstat = {0};
+SVPN_STAT rec_stat = {0};
+struct	tm	tmnow = {0};
+char	fname [ NAME_MAX] = {0};
+struct iovec iov [] = { {&tmnow, sizeof(struct	tm)}, {&rec_stat, sizeof(SVPN_STAT)} };
+int	fd = -1, iovlen = sizeof(struct tm) + sizeof(g_stat);
+static struct timespec tslast = {0};
+struct timespec tsnow = {0}, tsdelta = {0};
 
-	if ( !$ASCLEN(&g_fifo) )
-		return;
+	/* Current time stamp	*/
+	__util$timbuf(NULL, &tmnow);
+	clock_gettime(CLOCK_REALTIME, &tsnow);
 
-	/* Update stat vector with computed bandwidth counters,
-	 * it's not correct way to use atomic values but is acceptable at glance
-	*/
-	vstat.bnetrd = g_stat.bnetrd - g_stat_last.bnetrd;
-	vstat.bnetwr = g_stat.bnetwr - g_stat_last.bnetwr;
+	__util$sub_time (&tsnow, &tslast, &tsdelta);
 
-	vstat.pnetrd = g_stat.pnetrd - g_stat_last.pnetrd;
-	vstat.pnetwr = g_stat.pnetwr - g_stat_last.pnetwr;
 
-	vstat.rtt = g_rtt;
-
-	__util$sub_time(&g_stat.ts, &g_stat_last.ts, &vstat.delta);
-	vstat.delta = vstat.delta.tv_sec ? vstat.delta : g_timers_set.t_ping;
-
-	/* Save current counters for future use */
-	g_stat_last = g_stat;
-
-	/* Open FIFO device, write stat vector record, close */
-	if( access($ASCPTR(&g_fifo), F_OK | W_OK) )
+	if ( $ASCLEN(&q_fstat) && (tsdelta.tv_sec > g_deltaonline) )
 		{
-		if ( 0 > (fd = open($ASCPTR(&g_fifo), O_WRONLY | O_NONBLOCK)) )
-			$IFTRACE(g_trace && (errno != ENXIO),  "open(%.*s), errno=%d", $ASC(&g_fifo), errno);
-		else if ( sizeof(SVPN_VSTAT) != write(fd, &vstat, sizeof(SVPN_VSTAT)) )
-			$IFTRACE(g_trace, "write(%.*s, %d octets), errno=%d", $ASC(&g_fifo), sizeof(vstat), errno);
+		tslast = tsnow;
 
-		if ( !(fd < 0) )
+		$IFTRACE(g_trace, "Stat file/path '%.*s'", $ASC(&q_fstat) );
+
+		/* Make a vector with differential counters */
+		rec_stat.bnetrd	= g_stat.bnetrd - g_stat_last.bnetrd;
+		rec_stat.bnetwr	= g_stat.bnetwr - g_stat_last.bnetwr;
+		rec_stat.btunrd	= g_stat.btunrd - g_stat_last.btunrd;
+		rec_stat.btunwr	= g_stat.btunwr - g_stat_last.btunwr;
+
+		rec_stat.pnetrd	= g_stat.pnetrd - g_stat_last.pnetrd;
+		rec_stat.pnetwr	= g_stat.pnetwr - g_stat_last.pnetwr;
+		rec_stat.ptunrd	= g_stat.ptunrd - g_stat_last.ptunrd;
+		rec_stat.ptunwr	= g_stat.ptunwr - g_stat_last.ptunwr;
+
+		/* Check that statistic vector is not zero */
+		if ( !__util$iszero (&rec_stat, sizeof(rec_stat)) )
+			{
+			/* Generate a final file specification by adding year and month at end of file specification from configuration option:
+			 * e.g. :
+			 *	./tmp/starlet-zilla/tun135.stat
+			 * -->
+			 *	./tmp/starlet-zilla/tun135.stat-2019-01
+			 */
+			sprintf(fname, "%.*s-%04d-%02d", $ASC(&q_fstat), tmnow.tm_year, tmnow.tm_mon);
+
+			$IFTRACE(g_trace, "Writting statistic to '%s'", fname );
+
+			if ( 0 > (fd = open (fname, O_CREAT | O_WRONLY | O_APPEND, f_mode)) )
+				$LOG(STS$K_ERROR, "open(%s)->%d, errno=%d", fname, fd, errno);
+
+			else if ( iovlen  != writev(fd, iov, $ARRSZ(iov)) )		/* Write record: <timespec> <stat vector> */
+				$LOG(STS$K_ERROR, "Statistic write error, writev(#%d, %s, %d octets), errno=%d", fd, fname, iovlen, errno);
+
+			else	$IFTRACE(g_trace, "Statistic (%d octets) has been saved '%s'", iovlen, fname );
+
 			close(fd);
+			}
 		}
+
+
+
+	if ( $ASCLEN(&g_fifo) )
+		{
+
+		/* Update stat vector with computed bandwidth counters,
+		 * it's not correct way to use atomic values but is acceptable at glance
+		*/
+		vstat.bnetrd = g_stat.bnetrd - g_stat_last.bnetrd;
+		vstat.bnetwr = g_stat.bnetwr - g_stat_last.bnetwr;
+
+		vstat.pnetrd = g_stat.pnetrd - g_stat_last.pnetrd;
+		vstat.pnetwr = g_stat.pnetwr - g_stat_last.pnetwr;
+
+		vstat.rtt = g_rtt;
+
+		__util$sub_time(&g_stat.ts, &g_stat_last.ts, &vstat.delta);
+		vstat.delta = vstat.delta.tv_sec ? vstat.delta : g_timers_set.t_ping;
+
+
+		/* Open FIFO device, write stat vector record, close */
+		if( access($ASCPTR(&g_fifo), F_OK | W_OK) )
+			{
+			if ( 0 > (fd = open($ASCPTR(&g_fifo), O_WRONLY | O_NONBLOCK)) )
+				$IFTRACE(g_trace && (errno != ENXIO),  "open(%.*s), errno=%d", $ASC(&g_fifo), errno);
+			else if ( sizeof(SVPN_VSTAT) != write(fd, &vstat, sizeof(SVPN_VSTAT)) )
+				$IFTRACE(g_trace, "write(%.*s, %d octets), errno=%d", $ASC(&g_fifo), sizeof(vstat), errno);
+
+			if ( !(fd < 0) )
+				close(fd);
+			}
+		}
+
 
 	/* Adjust total data traffic volume */
 	g_data_volume	+= g_stat.bnetrd;
@@ -696,6 +774,10 @@ SVPN_VSTAT vstat = {0};
 
 	if ( !(fd < 0) )
 		close(fd);
+
+
+	/* Save current counters for future use */
+	g_stat_last = g_stat;
 }
 
 /*
@@ -2138,7 +2220,6 @@ struct timespec deltaonline = {0, 0}, now;
 			g_outseq = g_inpseq = 0;
 			g_input_count = 0;
 
-
 			exec_script(&g_linkup);
 
 			backlog_update (&g_client_sk.sin_addr);
@@ -2154,7 +2235,7 @@ struct timespec deltaonline = {0, 0}, now;
 
 
 		if ( g_state == SVPN$K_STATEOFF )	/* I/O workers should be hibernated, call external script,
-							 * switch our stet into the "wait for initial control requests"
+							 * switch our state into the "wait for initial control requests"
 							 */
 			{
 			set_tun_state(0);	/* Down the tunX */
@@ -2162,7 +2243,7 @@ struct timespec deltaonline = {0, 0}, now;
 			exec_script(&g_linkdown);
 
 			/* Write session statistic record */
-			stat_write();
+			//stat_write();
 
 			g_state = SVPN$K_STATECTL;
 			$LOG(STS$K_INFO, "IP: %s is OFFLINE", inet_ntop(AF_INET, &g_client_sk.sin_addr, buf, sizeof(buf)));
@@ -2220,7 +2301,7 @@ struct timespec deltaonline = {0, 0}, now;
 					__util$add_time(&now, &ts, &deltaonline);
 
 
-					stat_write();
+					//stat_write();
 					}
 				}
 
@@ -2241,7 +2322,7 @@ struct timespec deltaonline = {0, 0}, now;
 		$IFTRACE(g_trace, "TUN RD: %llu packets, %llu octets, WR: %llu packets, %llu octets", g_stat.ptunrd, g_stat.btunrd, g_stat.ptunwr, g_stat.btunwr);
 		$IFTRACE(g_trace, "UDP RD: %llu packets, %llu octets, WR: %llu packets, %llu octets", g_stat.ptunrd, g_stat.btunrd, g_stat.ptunwr, g_stat.btunwr);
 
-		/* Update state counters
+		/* Save statistic, update state counters
 		 * Do we reach limit ?!
 		 */
 		stat_update();
@@ -2253,7 +2334,7 @@ struct timespec deltaonline = {0, 0}, now;
 	set_tun_state(0);		/* Down the tunX */
 	tun_shut();
 	exec_script(&g_linkdown);	/* Switch /dev/tunX DOWN */
-	stat_write();			/* Write session statistic record */
+	stat_update();
 
 	/* Get out !*/
 	$LOG(STS$K_INFO, "Exit with exit_flag=%d!", g_exit_flag);
