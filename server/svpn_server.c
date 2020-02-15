@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNSRV"
-#define	__IDENT__	"X.00-15"
-#define	__REV__		"0.15.0"
+#define	__IDENT__	"X.00-15ECO1"
+#define	__REV__		"0.15.1"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -103,6 +103,11 @@
 **	27-JAN-2020	RRL	X.00-14ECO4 : Write stat record at interval basis (deltaonline).
 **
 **	28-JAN-2020	RRL	X.00-15 : Refactoring stat_update()
+**
+**	15-FEB-2020	RRL	X.00-15ECO1 : fixed logic bug in the control () of  checking of packet preamble;
+**				changed generation of error message to trace message;
+**				improved diagnostic;
+**				removed unused stuff;
 **--
 */
 
@@ -1881,13 +1886,11 @@ va_list ap;
  */
 static int	control	(void)
 {
-int	status, bufsz, adjlen = 0, buflen = 0, v_type = 0, ulen = 0, plen = 0, revlen = 0;
-struct pollfd pfd = {g_udp_sd, POLLIN, 0 };
-char	buf[SVPN$SZ_IOBUF], salt[SVPN$SZ_SALT], *bufp, sfrom[64] = {0}, user[SVPN$SZ_USER], pass[SVPN$SZ_PASS],
-	digest[SVPN$SZ_DIGEST], rev[255] = {0};
+int	status, bufsz, adjlen = 0, buflen = 0, v_type = 0, ulen = 0, revlen = 0;
+char	buf[SVPN$SZ_IOBUF], *bufp, sfrom[64] = {0}, user[SVPN$SZ_USER],
+	rev[255] = {0};
 SVPN_PDU *pdu = (SVPN_PDU *) buf;
 struct sockaddr_in from = {0};
-SHA1Context	sha = {0};
 
 	/* Accept LOGIN request from any IP ... */
 	from.sin_family = AF_INET;
@@ -1904,8 +1907,18 @@ SHA1Context	sha = {0};
 
 
 	/* Check length and magic prefix of the packet, just drop unrelated packets */
-	if ( (buflen < SVPN$SZ_PDUHDR) && (memcmp(pdu->magic, SVPN$T_MAGIC,  SVPN$SZ_MAGIC)) )
-		return	$LOG(STS$K_ERROR, "[#%d]Drop request code %#x, from %s:%d, %d octets", g_udp_sd, pdu->req, buflen);
+	if ( (buflen < SVPN$SZ_PDUHDR) || (memcmp(pdu->magic, SVPN$T_MAGIC,  SVPN$SZ_MAGIC)) )
+		{
+
+		if ( g_trace )
+			{
+			revlen = __util$bin2hex(pdu, rev, buflen);
+			$IFTRACE(g_trace, "[#%d]Too short (%d < %d) or invalid preamble: [%.*s]", g_udp_sd, buflen, SVPN$SZ_PDUHDR, revlen, rev);
+			}
+
+		/* It's not alarm sitation, no message, just return corresponding condition */
+		return	STS$K_ERROR;	/* $LOG(STS$K_ERROR, "[#%d]Drop request code %#x, from %s:%d, %d octets", g_udp_sd, pdu->req, buflen); */
+		}
 
 	if ( pdu->proto != SVPN$K_PROTO_V1  )
 		return	$LOG(STS$K_ERROR, "[#%d]Unsupported protocol version %d", g_udp_sd, pdu->proto);
