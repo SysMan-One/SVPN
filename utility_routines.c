@@ -1154,7 +1154,7 @@ int	fd = -1;
 	if ( !*logfile)
 		return	STS$K_SUCCESS;
 
-	if ( 0 > (fd = open(logfile, O_RDWR | O_CREAT, mode)) )
+	if ( 0 > (fd = open(logfile, O_RDWR | O_CREAT | O_APPEND, mode)) )
 		return	$LOG(STS$K_ERROR, "Error opening log file '%s', errno = %d.", logfile, errno);
 
 	lseek(fd, 0L, SEEK_END);

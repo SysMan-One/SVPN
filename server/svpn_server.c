@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNSRV"
-#define	__IDENT__	"X.00-15ECO1"
-#define	__REV__		"0.15.1"
+#define	__IDENT__	"X.00-15ECO2"
+#define	__REV__		"0.15.2"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -108,6 +108,8 @@
 **				changed generation of error message to trace message;
 **				improved diagnostic;
 **				removed unused stuff;
+**
+**	20-MAR-2020	RRL	X.00-15ECO2 : Fix "20-04-2020 11:54:38.991  15164 [SVPNSRV\stat_update\776] %SVPN-E: open(), errno=2"
 **--
 */
 
@@ -772,14 +774,16 @@ struct timespec tsnow = {0}, tsdelta = {0};
 	/*
 	 * Update Data Volume counter in the file
 	 */
-	if ( 0 > (fd = open($ASCPTR(&g_volume), O_WRONLY | O_CREAT, f_mode)) )
-		$LOG(STS$K_ERROR, "open(%s), errno=%d", $ASCPTR(&g_volume), errno);
-	else if ( sizeof(g_data_volume) != write (fd, &g_data_volume, sizeof(g_data_volume)) )
-		$LOG(STS$K_ERROR, "write(%s, %d octets), errno=%d", $ASCPTR(&g_volume), sizeof(g_data_volume), errno);
+	if ( $ASCLEN(&g_volume)  )
+		{
+		if ( 0 > (fd = open($ASCPTR(&g_volume), O_WRONLY | O_CREAT, f_mode)) )
+			$LOG(STS$K_ERROR, "open(%s), errno=%d", $ASCPTR(&g_volume), errno);
+		else if ( sizeof(g_data_volume) != write (fd, &g_data_volume, sizeof(g_data_volume)) )
+			$LOG(STS$K_ERROR, "write(%s, %d octets), errno=%d", $ASCPTR(&g_volume), sizeof(g_data_volume), errno);
 
-	if ( !(fd < 0) )
-		close(fd);
-
+		if ( !(fd < 0) )
+			close(fd);
+		}
 
 	/* Save current counters for future use */
 	g_stat_last = g_stat;
