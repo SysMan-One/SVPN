@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNCLNT"
-#define	__IDENT__	"X.00-09"
-#define	__REV__		"0.09.0"
+#define	__IDENT__	"V.01-00"
+#define	__REV__		"1.00.0"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -81,6 +81,8 @@
 **	21-NOV-2019	RRL	X.00-08 : Added assingment of the NETWORK MASK on the TUN device.
 **
 **	23-NOV-2019	RRL	X.00-09 : Changed default mode for TUN device to TUN
+**
+**	 3-OCT-2020	RRL	V.01-00 : Added support of unpacking multiple IP-packets from single UDP datagram
 **
 **--
 */
@@ -211,6 +213,8 @@ static	const	int slen = sizeof(struct sockaddr), one = 1, off = 0;
 static const char magic [SVPN$SZ_MAGIC] = {SVPN$T_MAGIC};
 static const unsigned long long *magic64 = (unsigned long long *) &magic;
 
+static const uint64_t	g_options = SVPN$K_OPT_AGGR; /* We support aggregation		*/
+
 static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
 	g_state = SVPN$K_STATECTL,	/* Initial state for SVPN-Server	*/
 	g_trace = 0,			/* A flag to produce extensible logging	*/
@@ -219,10 +223,12 @@ static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
 	g_udp_sd = -1,
 	g_tun_fd = -1,
 	g_tun_sdctl = -1,
-	g_mss = 0,			/* MTU for datagram			*/
-	g_mtu = 0,			/* MSS for TCP/SYN			*/
-	g_logsize = 0,			/* A maximum lofgile size in octets	*/
-	g_tunflags = IFF_TUN;		/* Default type of the '/dev/net/tun'	*/
+	g_mss = 0,			/* MSS for TCP/SYN			*/
+	g_mtu = 0,			/* MTU for datagram			*/
+	g_logsize = 0,			/* A maximum logfile size in octets	*/
+	g_tunflags = IFF_TUN,		/* Default type of the '/dev/net/tun'	*/
+	g_run_options,			/* A negotiated set of options		*/
+	g_delay = 0;			/* A time to accumulate IP-packets before aggregate */
 
 static	atomic_ullong g_input_count = 0;/* Should be increment by receiving from UDP */
 
@@ -246,12 +252,12 @@ struct sockaddr_in g_server_sk = {.sin_family = AF_INET};
 /* Structure to keep timers information */
 typedef	struct __svpn_timers__	{
 
-struct timespec	t_io,		/* General network I/O timeout	*/
-		t_idle,		/* Close tunnel on non-activity	*/
-		t_ping,		/* Send "ping" every <t_ping> seconds,	*/
-				/* ... wait "pong" from client for <t_ping> seconds	*/
+struct timespec	t_io,			/* General network I/O timeout	*/
+		t_idle,			/* Close tunnel on non-activity	*/
+		t_ping,			/* Send "ping" every <t_ping> seconds,	*/
+					/* ... wait "pong" from client for <t_ping> seconds	*/
 
-		t_max;		/* Seconds, total limit of time for established tunnel */
+		t_max;			/* Seconds, total limit of time for established tunnel */
 		int	retry;
 
 } SVPN_TIMERS;
@@ -932,12 +938,12 @@ va_list ap;
  */
 static int	control	(void)
 {
-int	status, len = 0, buflen = 0, v_type = 0, bufsz = 0;
+int	len = 0, buflen = 0, v_type = 0, bufsz = 0;
 char buf[SVPN$SZ_IOBUF];
 SVPN_PDU *pdu = (SVPN_PDU *) buf;
 
 
-	/* Send LOGIN <user> request
+	/* Send LOGIN <user> <password> request
 	 *	pdu->digest = sha(header, salt, payload);
 	 */
 	pdu->magic64 = *magic64; /* memcpy(pdu->magic, SVPN$T_MAGIC, SVPN$SZ_MAGIC); */
@@ -953,10 +959,14 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
 	buflen += len;
 	bufsz -= len;
 
+	tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_OPTS, SVPN$K_LONG, &g_options, sizeof(g_options), &len);
+	buflen += len;
+	bufsz -= len;
+
 	/* Compute HMAC*/
 	hmac_gen(pdu->digest, SVPN$SZ_DIGEST,
 			pdu, SVPN$SZ_HASHED, pdu->data, buflen - SVPN$SZ_PDUHDR, $ASCPTR(&g_auth), $ASCLEN(&g_auth),
-				NULL /* End-of-arguments marger !*/);
+				NULL /* End-of-arguments marqer !*/);
 
 	if ( !(1 & xmit_pkt (g_udp_sd, buf, buflen, &g_server_sk)) )
 		return	$LOG(STS$K_ERROR, "[#%d]Error send HELLO to %.*s", g_udp_sd, $ASC(&g_server));
@@ -1036,6 +1046,9 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
 	len = sizeof(g_tunflags);
 	tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_TUNTYPE, &v_type, &g_tunflags, &len);
 
+	len = sizeof(g_run_options);
+	tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_OPTS, &v_type, &g_run_options, &len);
+
 	/* Display session parameters ... */
 	$LOG(STS$K_INFO, "Session parameters  :");
 
@@ -1049,6 +1062,10 @@ SVPN_PDU *pdu = (SVPN_PDU *) buf;
 
 	$LOG(STS$K_INFO, "\tTimers     : ping=%u, idle=%u, total=%u, retry=%d",
 	     g_timers_set.t_ping.tv_sec, g_timers_set.t_idle.tv_sec, g_timers_set.t_max.tv_sec, g_timers_set.retry);
+
+	$LOG(STS$K_INFO, "\tLcl options: %08x, Rmt options: %08x ", g_options, g_run_options);
+	g_run_options &= g_options;
+	$LOG(STS$K_INFO, "\tRun options: %08x (negotiated)", g_run_options);
 
 	return	$LOG(STS$K_SUCCESS, "Session is established");
 }
@@ -1127,6 +1144,65 @@ SVPN_PDU pdu = {0};
 
 	return	STS$K_SUCCESS;
 }
+
+/*
+ *   DESCRIPTION: Retrieve from the given buffer frame/packet and send it to the TUN/TAP device.
+ *
+ *   INPUTS:
+ *	td:	TUN/TAP device I/O descriptor
+ *	buf:	A buffer with frames/packets to process
+ *	buflen:	Actual length of data in the buffer
+ *
+ *   IMPLICITE INPUTS:
+ *	g_tunflags
+ *
+ *   OUTPUTS:
+ *	NONE
+ *
+ *   RETURNS:
+ *	condition code
+ */
+static inline	int	__multiple_write(
+				int	td,
+				char	*buf,
+				int	buflen
+					)
+{
+int	len;
+struct ethhdr	*eth;
+struct iphdr	*iph;
+
+	/* Heh, sanity check ... */
+	if ( !buflen )
+		return STS$K_SUCCESS;
+
+
+	/* Compute a size of the data to be write depending on type of TUN/TAP device */
+	if ( g_tunflags & IFF_TUN )
+		{
+		eth = (struct ethhdr *) buf;
+		iph = (struct iphdr *)  (buf + ETH_HLEN);
+
+		len = ETH_HLEN + ntohs(iph->tot_len) + ETH_FCS_LEN;
+		}
+	else	{ /* if ( g_tunflags & IFF_TAP ) */
+		iph = (struct iphdr *) buf;
+
+		len = ntohs(iph->tot_len);
+		}
+
+	/* Write frame or IP-packet to the TUN/TAP device */
+	if ( len != write(td, buf, len) )
+		$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on TUN device, write(%d octets), errno=%d", td, g_udp_sd, len, __ba_errno__);
+
+	/* Is there unprocessed data in the buffer ? */
+	if ( buflen -= len )
+		return	__multiple_write(td, buf + len, buflen);
+
+
+	return	STS$K_SUCCESS;
+}
+
 
 
 
@@ -1259,7 +1335,11 @@ struct	sockaddr_in rsock = {0};
 			if ( g_enc != SVPN$K_ENC_NONE )
 				decode(g_enc, buf, rc, g_key, sizeof(g_key));
 
-			if ( rc != write(td, buf, rc) )
+			/* If aggregation option is take place we need to retrieve frame/IP-packet from datagrame */
+
+			if ( SVPN$K_OPT_AGGR & g_run_options )
+				__multiple_write(td, buf, rc);
+			else if ( rc != write(td, buf, rc) )
 				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on TUN device, write(%d octets), errno=%d", td, g_udp_sd, rc, __ba_errno__);
 
 			//$IFTRACE(g_trace, "TUN WR: %d octets", rc);

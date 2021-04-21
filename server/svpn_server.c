@@ -1,6 +1,6 @@
 #define	__MODULE__	"SVPNSRV"
-#define	__IDENT__	"X.00-15ECO2"
-#define	__REV__		"0.15.2"
+#define	__IDENT__	"V.01-01ECO1"
+#define	__REV__		"1.01.1"
 
 #ifdef	__GNUC__
 	#pragma GCC diagnostic ignored  "-Wparentheses"
@@ -110,6 +110,21 @@
 **				removed unused stuff;
 **
 **	20-MAR-2020	RRL	X.00-15ECO2 : Fix "20-04-2020 11:54:38.991  15164 [SVPNSRV\stat_update\776] %SVPN-E: open(), errno=2"
+**
+**	 4-MAY-2020	RRL	X.00-15ECO3 : Fixed bug with missing of network/send counters.
+**
+**	14-MAY-2020	RRL	X.00-15ECO4 : Refactoring maintenance of statistic counters;
+**				fix a incorrect checing the FIFO device with the access();
+**
+**	 9-JUN-2020	RRL	X.00-15ECO5 : Fixed bug with "negative" counters in the stat file.
+**
+**	13-SEP-2020	RRL	X.00-16 : Added producing of T4 file;
+**				Fixed non-atomic operations on statistic vector;
+**
+**	17-SEP-2020	RRL	V.01-01 : Added logic to recognize a concurrent LOGIN request;
+**				correct T4;
+**				some other cosmetic changes;
+**
 **--
 */
 
@@ -173,7 +188,7 @@
 #include	<netinet/ip.h>
 #include	<netinet/ip6.h>
 #include	<netinet/tcp.h>
-
+#include	<netinet/udp.h>
 #endif
 
 #define	__FAC__	"SVPN"
@@ -255,21 +270,25 @@ static	const	int slen = sizeof(struct sockaddr), one = 1, off = 0;
 static const char magic [SVPN$SZ_MAGIC] = {SVPN$T_MAGIC};
 static const unsigned long long *magic64 = (unsigned long long *) &magic;
 
-static	int	g_exit_flag = 0, 	/* Global flag 'all must to be stop'	*/
-	g_state = SVPN$K_STATECTL,	/* Initial state for SVPN-Server	*/
-	g_trace = 0,			/* A flag to produce extensible logging	*/
-	g_enc = SVPN$K_ENC_NONE,	/* Encryption mode, default is none	*/
-	g_threads = 1,			/* A size of the worker crew threads	*/
+static	int	g_exit_flag = 0,		/* Global flag 'all must to be stop'	*/
+	g_state = SVPN$K_STATECTL,		/* Initial state for SVPN-Server	*/
+	g_trace = 0,				/* A flag to produce extensible logging	*/
+	g_enc = SVPN$K_ENC_NONE,		/* Encryption mode, default is none	*/
+	g_threads = 1,				/* A size of the worker crew threads	*/
 	g_udp_sd = -1,
 	g_tun_fd = -1,
-	g_mtu = 0,			/* MTU for datagram			*/
-	g_mss = 0,			/* MSS for TCP/SYN			*/
-	g_outseq = 1,			/* A sequence number for sent PING	*/
-	g_inpseq,			/* A sequence number for received PONG	*/
-	g_logsize = 0,			/* A maximum lofgile size in octets	*/
-	g_deltaonline = 300,		/* An interval of printing "Client still ONLINE" */
+	g_mtu = 0,				/* MTU for datagram			*/
+	g_mss = 0,				/* MSS for TCP/SYN			*/
+	g_outseq = 1,				/* A sequence number for sent PING	*/
+	g_inpseq,				/* A sequence number for received PONG	*/
+	g_logsize = 0,				/* A maximum lofgile size in octets	*/
+	g_deltaonline = 300,			/* An interval of printing "Client still ONLINE" */
 	g_lenbacklog = 0,
-	g_tunflags = IFF_TUN;		/* Default type of the '/dev/net/tun'	*/
+	g_tunflags = IFF_TUN,			/* Default type of the '/dev/net/tun'	*/
+	g_deltastat = 30,			/* An interval to flush statistic
+						counters to file */
+	g_t4fd = -1;				/* File decriptor for T4 stat file	*/
+
 
 unsigned long long g_data_volume_limit = 0,	/* A total tunnel traffic volume limit	*/
 		g_data_volume = 0;		/* Current volume of the traffic	*/
@@ -277,40 +296,42 @@ unsigned long long g_data_volume_limit = 0,	/* A total tunnel traffic volume lim
 static	volatile int	reset_by_external_flag = 0;
 
 
-static	atomic_ullong g_input_count = 0;/* Should be increment by receiving from UDP */
+static	atomic_ullong g_input_count = 0;	/* Should be increment by receiving from UDP */
 
 
 static const struct timespec g_locktmo = {5, 0};/* A timeout for thread's wait lock	*/
 
-ASC	g_tun = {$ASCINI("tunX:")},	/* OS specific TUN device name		*/
-	g_logfspec = {0}, g_confspec = {0},
-	g_bind = {0}, g_cliname = {0}, g_auth = {0},
-	g_network = {$ASCINI("192.168.1.0/24")}, g_cliaddr = {$ASCINI("192.168.1.2")}, g_locaddr = {$ASCINI("192.168.1.1")},
-	g_timers = {$ASCINI("7, 120, 13")},
-	g_keepalive = {$ASCINI("3, 3")},
-	g_climsg = {0}, g_linkup = {0}, g_linkdown = {0},
+ASC	q_tun = {$ASCINI("tunX:")},		/* OS specific TUN device name		*/
+	q_logfspec = {0}, g_confspec = {0},
+	q_bind = {0}, q_cliname = {0}, q_auth = {0},
+	q_network = {$ASCINI("192.168.1.0/24")}, q_cliaddr = {$ASCINI("192.168.1.2")}, q_locaddr = {$ASCINI("192.168.1.1")},
+	q_timers = {$ASCINI("7, 120, 13")},
+	q_keepalive = {$ASCINI("3, 3")},
+	q_climsg = {0}, q_linkup = {0}, q_linkdown = {0},
 	q_fstat = {0},
-	g_ipbacklog = {0},
-	g_fifo = {0},			/* FIFO spec to interchange by counters		*/
-	g_volume = {0},			/* File to keep a traficc voulme for the tunnel	*/
-	g_tunmode = {$ASCINI("TUN")};	/* Default type of the TUN device is TAP	*/
+	q_ipbacklog = {0},
+	q_fifo = {0},				/* FIFO spec to interchange by counters		*/
+	q_volume = {0},				/* File to keep a trafic voulme for the tunnel	*/
+	q_tunmode = {$ASCINI("TUN")},		/* Default type of the TUN device is TAP	*/
+	q_t4stat = {0};				/* T4 file specification			*/
 
 
-struct in_addr g_ia_network = {0}, g_ia_local = {0}, g_ia_cliaddr = {0} , g_netmask = {-1};
+
+struct in_addr	g_ia_network = {0}, g_ia_local = {0}, g_ia_cliaddr = {0} , g_netmask = {-1};
 
 struct sockaddr_in g_server_sk = {.sin_family = AF_INET}, g_client_sk = {.sin_family = AF_INET};
 
 char	g_key[SVPN$SZ_DIGEST];
 
-					/* Structure to keep timers information */
+						/* Structure to keep timers information */
 typedef	struct __svpn_timers__	{
 
-	struct timespec	t_io,		/* General network I/O timeout	*/
-			t_idle,		/* Close tunnel on non-activity	*/
-			t_ping,		/* Send "ping" every <t_ping> seconds,	*/
-					/* ... wait "pong" from client for <t_ping> seconds	*/
+	struct timespec	t_io,			/* General network I/O timeout	*/
+			t_idle,			/* Close tunnel on non-activity	*/
+			t_ping,			/* Send "ping" every <t_ping> seconds,	*/
+						/* ... wait "pong" from client for <t_ping> seconds	*/
 
-			t_max;		/* Seconds, total limit of time for established tunnel */
+			t_max;			/* Seconds, total limit of time for established tunnel */
 	int	retry;
 
 } SVPN_TIMERS;
@@ -320,9 +341,9 @@ struct timespec	g_rtt = {.tv_sec = 1, .tv_nsec = 1};
 static	SVPN_TIMERS	g_timers_set = { {7, 0}, {120, 0}, {13, 0}, {600, 0}, 3};
 
 
-					/* PTHREAD's stuff is supposed to be used to control worker's
-					 * crew threads
-					 */
+						/* PTHREAD's stuff is supposed to be used to control worker's
+						* crew threads
+						*/
 static	pthread_mutex_t crew_mtx = PTHREAD_MUTEX_INITIALIZER;
 static	pthread_cond_t	crea_cond = PTHREAD_COND_INITIALIZER;
 
@@ -344,43 +365,72 @@ typedef struct	__svpn_stat__
 	struct  timespec ts;
 
 } SVPN_STAT;
-SVPN_STAT	g_stat_last = {0}, g_stat = {0}, g_stat_zero = {0};
+SVPN_STAT	g_stat = {0}, g_stat_zero = {0},
+		g_stlast1 = {0},		/* Keep stats for file */
+		g_stlast2 = {0};		/* Keep stats for volume */
 
 
+atomic_ullong	g_stat_p128,			/* Count of 0-128 octets sized of IP-packet from TUN/TAP */
+		g_stat_p256,			/* Count of 0-256  -- // -- */
+		g_stat_p512;			/* Count of 0-512 -- // -- */
 
-const OPTS optstbl [] =		/* Configuration options		*/
+
+						/* T4 Related stuff, file header and record format  */
+const char t4hdr [] =	"sVPN - Tunnel statistic," CRLF \
+			"%02d-%02d-%04d," CRLF \
+			"%02d:%02d:%02d," CRLF ,
+
+	t4rechdr [] =	"$$$ START COLUMN HEADERS $$$" CRLF \
+
+			"Sample Time" CRLF \
+			"NET: Rx octets" CRLF "NET: Tx octets" CRLF \
+			"TAP: Rx octets" CRLF "TAP: Tx octets" CRLF \
+			"TAP: Rx count"  CRLF "TAP: Tx count" CRLF \
+			"TAP: <128 pkts" CRLF "TAP: <256 pkts" CRLF "TAP: <512 pkts" CRLF \
+
+			"$$$ END COLUMN HEADERS $$$" CRLF ,
+
+	t4rec []  =	"%02d-%02d-%04d %02d:%02d:%02d, " \
+			"%llu, %llu, " \
+			"%llu, %llu, " \
+			"%llu, %llu, " \
+			"%llu, %llu, %llu " CRLF;
+
+const OPTS optstbl [] =				/* Configuration options		*/
 {
-	{$ASCINI("config"),	&g_confspec, ASC$K_SZ,	OPTS$K_CONF},
-	{$ASCINI("trace"),	&g_trace, 0,		OPTS$K_OPT},
-	{$ASCINI("bind"),	&g_bind, ASC$K_SZ,	OPTS$K_STR},
-	{$ASCINI("logfile"),	&g_logfspec, ASC$K_SZ,	OPTS$K_STR},
-	{$ASCINI("logsize"),	&g_logsize, 0,		OPTS$K_INT},
-	{$ASCINI("devtun"),	&g_tun, ASC$K_SZ,	OPTS$K_STR},
-	{$ASCINI("cliname"),	&g_cliname, ASC$K_SZ,	OPTS$K_STR},
-	{$ASCINI("cliaddr"),	&g_cliaddr, ASC$K_SZ,	OPTS$K_STR},
-	{$ASCINI("climsg"),	&g_climsg, ASC$K_SZ,	OPTS$K_STR},
-	{$ASCINI("locaddr"),	&g_locaddr, ASC$K_SZ,	OPTS$K_STR},
-	{$ASCINI("auth"),	&g_auth, ASC$K_SZ,	OPTS$K_STR},
-	{$ASCINI("network"),	&g_network, ASC$K_SZ,	OPTS$K_STR},
-	{$ASCINI("timers"),	&g_timers, ASC$K_SZ,	OPTS$K_STR},
-	{$ASCINI("keepalive"),	&g_keepalive, ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("config"),	&g_confspec, ASC$K_SZ,	OPTS$K_CONF},		/* File spec of the configuration file */
+	{$ASCINI("trace"),	&g_trace, 0,		OPTS$K_OPT},		/* Extensible diagnostic output	*/
+	{$ASCINI("bind"),	&q_bind, ASC$K_SZ,	OPTS$K_STR},		/* Bind socket to IP:PORT/<dev> */
+	{$ASCINI("logfile"),	&q_logfspec, ASC$K_SZ,	OPTS$K_STR},		/* File spec of log file */
+	{$ASCINI("logsize"),	&g_logsize, 0,		OPTS$K_INT},		/* Maximum size in octets of the log file */
+	{$ASCINI("devtun"),	&q_tun, ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("cliname"),	&q_cliname, ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("cliaddr"),	&q_cliaddr, ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("climsg"),	&q_climsg, ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("locaddr"),	&q_locaddr, ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("auth"),	&q_auth, ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("network"),	&q_network, ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("timers"),	&q_timers, ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("keepalive"),	&q_keepalive, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("encryption"),	&g_enc,	0,		OPTS$K_INT},
 	{$ASCINI("threads"),	&g_threads,	0,	OPTS$K_INT},
-	{$ASCINI("linkup"),	&g_linkup, ASC$K_SZ,	OPTS$K_STR},
-	{$ASCINI("linkdown"),	&g_linkdown, ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("linkup"),	&q_linkup, ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("linkdown"),	&q_linkdown, ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("MTU"),	&g_mtu,	0,		OPTS$K_INT},
 	{$ASCINI("MSS"),	&g_mss,	0,		OPTS$K_INT},
 	{$ASCINI("deltaonline"),&g_deltaonline,	0,	OPTS$K_INT},
 	{$ASCINI("stat"),	&q_fstat,ASC$K_SZ,	OPTS$K_STR},
-	{$ASCINI("ipbacklog"),	&g_ipbacklog,ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("ipbacklog"),	&q_ipbacklog,ASC$K_SZ,	OPTS$K_STR},
+										/* Quota of volume traffic for the TUN */
 	{$ASCINI("data_volume_limit"),	&g_data_volume_limit, 0,		OPTS$K_INT},
-	{$ASCINI("modetun"),	&g_tunmode,ASC$K_SZ,	OPTS$K_STR},
-
+	{$ASCINI("modetun"),	&q_tunmode,ASC$K_SZ,	OPTS$K_STR},
+	{$ASCINI("deltastat"),	&g_deltastat,	0,	OPTS$K_INT},
+	{$ASCINI("t4stat"),	&q_t4stat, ASC$K_SZ,	OPTS$K_STR},			/* A file to keep statistic in T4 format */
 
 	OPTS_NULL
 };
 
-const mode_t f_mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+const mode_t fileprot = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
 
 const char	help [] = { "Usage:\n" \
 	"$ %s [<options_list>]\n\n" \
@@ -395,21 +445,61 @@ const char	help [] = { "Usage:\n" \
 
 
 
+
+
+static	int	t4_open	(void)
+{
+int	status, len;
+struct	tm	_tm;
+char	buf[512];
+
+	if ( g_t4fd > 0 )
+		return	STS$K_SUCCESS;
+
+	$IFTRACE(g_trace, "Open/create T4 file '%.*s'", $ASC(&q_t4stat) );
+
+	if ( 0 > (g_t4fd = open($ASCPTR(&q_t4stat), O_APPEND | O_WRONLY | O_CREAT, fileprot)) )
+		return	$LOG(STS$K_ERROR, "Error open/create file %s, errno=%d", $ASCPTR(&q_t4stat), errno);
+
+	/* If file is newly created - file position is 0 */
+	if ( 0 < (lseek(g_t4fd, 0, SEEK_END)) )
+		return	$IFTRACE(g_trace, "%s - is open for append", $ASCPTR(&q_t4stat) ), STS$K_SUCCESS;
+
+
+	/* File is just has been created - need write a header */
+	$IFTRACE(g_trace, "Write header to T4 file %.*s", $ASC(&q_t4stat) );
+
+	__util$timbuf (NULL, &_tm);
+
+	len = snprintf(buf, sizeof(buf), t4hdr, _tm.tm_mday, _tm.tm_mon,_tm.tm_year,
+		_tm.tm_hour, _tm.tm_min, _tm.tm_sec);
+
+	if ( len != (status = write(g_t4fd, buf, len)) )
+		return	close(g_t4fd), $LOG(STS$K_ERROR, "Error write header to %s, write(%d octets)->%d, errno=%d", $ASCPTR(&q_t4stat), len, status, errno);
+
+	len = sizeof(t4rechdr) - 1;
+	if ( len != (status = write(g_t4fd, t4rechdr, len)) )
+		return	close(g_t4fd), $LOG(STS$K_ERROR, "Error write header to %s, write(%d octets)->%d, errno=%d", $ASCPTR(&q_t4stat), len, status, errno);
+
+	return	STS$K_SUCCESS;
+}
+
+
 /*
  *  DESCRIPTION: Read old content of the IP Backlog file, add new entry at begin of file,
  *	write new content to file.
  *
- *  INPUT:
+ *  INPUTS:
  *	ip:	IP address to be added
  *
- *  IMPLICITE INPUT:
+ *  IMPLICITE INPUTS:
  *	g_backlog
  *	g_lenbacklog
  *
- *  OUTPUT:
+ *  OUTPUTS:
  *	NONE
  *
- *  RETURN
+ *  RETURNS
  *	condition code
  *
  */
@@ -421,16 +511,16 @@ int	fd = -1, status;
 struct in_addr iparr [SVPN$SZ_MAXIPBLOG] = {0};
 
 
-	if ( !$ASCLEN(&g_ipbacklog) )
+	if ( !$ASCLEN(&q_ipbacklog) )
 		return	STS$K_SUCCESS;
 
 
-	if ( 0 > (fd = open($ASCPTR(&g_ipbacklog), O_RDWR | O_CREAT, f_mode)) )
-		return	$LOG(STS$K_ERROR, "IP Backlog file open(%s), errno=%d", $ASCPTR(&g_ipbacklog), errno);
+	if ( 0 > (fd = open($ASCPTR(&q_ipbacklog), O_RDWR | O_CREAT, fileprot)) )
+		return	$LOG(STS$K_ERROR, "IP Backlog file open(%s), errno=%d", $ASCPTR(&q_ipbacklog), errno);
 
 
 	if ( 0 > (status = read(fd, iparr, sizeof(iparr))) )
-		status = $LOG(STS$K_ERROR, "IP Backlog file read(%s), errno=%d", $ASCPTR(&g_ipbacklog), errno);
+		status = $LOG(STS$K_ERROR, "IP Backlog file read(%s), errno=%d", $ASCPTR(&q_ipbacklog), errno);
 	else	{
 		/* Set file pointer at begin of the backlog file */
 		lseek(fd, SEEK_SET, 0);
@@ -444,7 +534,7 @@ struct in_addr iparr [SVPN$SZ_MAXIPBLOG] = {0};
 
 		/* Write IPs array back to the file */
 		if ( 0 > (status = write (fd, iparr, sizeof(iparr))) )
-			status = $LOG(STS$K_ERROR, "IP Backlog file write(%s), errno=%d", $ASCPTR(&g_ipbacklog), errno);
+			status = $LOG(STS$K_ERROR, "IP Backlog file write(%s), errno=%d", $ASCPTR(&q_ipbacklog), errno);
 		else	status = STS$K_SUCCESS;
 		}
 
@@ -460,13 +550,13 @@ int	exec_script	(
 		)
 {
 int	status;
-char	cmd[NAME_MAX], ia[32];
+char	cmd[NAME_MAX], buf[32];
 
 	if ( !$ASCLEN(script) )	/* Nothing to do */
 		return	STS$K_SUCCESS;
 
-	sprintf(cmd, "%.*s %s:%d", $ASC(script),
-		inet_ntop(AF_INET, &g_client_sk.sin_addr, ia, sizeof(ia)),
+	snprintf(cmd, sizeof(cmd), "%.*s %s:%d", $ASC(script),
+		inet_ntop(AF_INET, &g_client_sk.sin_addr, buf, sizeof(buf)),
 		ntohs(g_client_sk.sin_port));
 
 	$IFTRACE(g_trace, "Executing %s ...", cmd);
@@ -495,18 +585,18 @@ int	status = STS$K_SUCCESS, bits, fd = -1;
 char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64], fspec[255];
 
 	/* /TIMERS*/
-	$ASCLEN(&g_timers) = __util$uncomment ($ASCPTR(&g_timers), $ASCLEN(&g_timers), '!');
-	$ASCLEN(&g_timers) = __util$collapse ($ASCPTR(&g_timers), $ASCLEN(&g_timers));
+	$ASCLEN(&q_timers) = __util$uncomment ($ASCPTR(&q_timers), $ASCLEN(&q_timers), '!');
+	$ASCLEN(&q_timers) = __util$collapse ($ASCPTR(&q_timers), $ASCLEN(&q_timers));
 
-	if ( $ASCLEN(&g_timers) )
+	if ( $ASCLEN(&q_timers) )
 		{
-		if ( cp = strtok_r( $ASCPTR(&g_timers), ",", &saveptr) )
+		if ( cp = strtok_r( $ASCPTR(&q_timers), ",", &saveptr) )
 			{
 			status = strtoul(cp, &endptr, 0);
 			g_timers_set.t_io.tv_sec = status;
 			}
 
-		if ( cp = strtok_r( $ASCPTR(&g_timers), ",", &saveptr) )
+		if ( cp = strtok_r( $ASCPTR(&q_timers), ",", &saveptr) )
 			{
 			status = strtoul(cp, &endptr, 0);
 			g_timers_set.t_idle.tv_sec = status;
@@ -519,20 +609,20 @@ char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64], fspec[255];
 			}
 		}
 
-	if ( $ASCLEN(&g_ipbacklog) )
+	if ( $ASCLEN(&q_ipbacklog) )
 		{
-		sscanf($ASCPTR(&g_ipbacklog), "%[^,\n],%[^\n]" , fspec, mask);
-		__util$str2asc (fspec, &g_ipbacklog);
+		sscanf($ASCPTR(&q_ipbacklog), "%[^,\n],%[^\n]" , fspec, mask);
+		__util$str2asc (fspec, &q_ipbacklog);
 		g_lenbacklog = atoi(mask);
 		g_lenbacklog = g_lenbacklog ? g_lenbacklog : 5;
 
-		$IFTRACE(g_trace, "ipbacklog=%.*s, lenipbacklog=%d", $ASC(&g_ipbacklog), g_lenbacklog);
+		$IFTRACE(g_trace, "ipbacklog=%.*s, lenipbacklog=%d", $ASC(&q_ipbacklog), g_lenbacklog);
 		}
 
 
-	sscanf($ASCPTR(&g_network), "%[^/\n]/%[^\n]" , ia, mask);
+	sscanf($ASCPTR(&q_network), "%[^/\n]/%[^\n]" , ia, mask);
 	if ( !inet_pton(AF_INET, ia, &g_ia_network) )
-		return	$LOG(STS$K_ERROR, "Error converting IA=%s from %.*s", ia, $ASCPTR(&g_network));
+		return	$LOG(STS$K_ERROR, "Error converting IA=%s from %.*s", ia, $ASCPTR(&q_network));
 
 	if ( bits = atoi(mask) )
 		__bits2inaddr(bits, &g_netmask);
@@ -540,22 +630,22 @@ char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64], fspec[255];
 	inet_ntop(AF_INET, &g_netmask, mask, sizeof(mask));
 	$IFTRACE(g_trace, "NETWORK:%s/%s", ia, mask);
 
-	sscanf($ASCPTR(&g_cliaddr), "%[^/\n]/%[^\n]" , ia, mask);
+	sscanf($ASCPTR(&q_cliaddr), "%[^/\n]/%[^\n]" , ia, mask);
 	if ( !inet_pton(AF_INET, ia, &g_ia_cliaddr) )
-		return	$LOG(STS$K_ERROR, "Error converting IA=%s from %.*s", ia, $ASCPTR(&g_cliaddr));
+		return	$LOG(STS$K_ERROR, "Error converting IA=%s from %.*s", ia, $ASCPTR(&q_cliaddr));
 
-	sscanf($ASCPTR(&g_locaddr), "%[^/\n]/%[^\n]" , ia, mask);
+	sscanf($ASCPTR(&q_locaddr), "%[^/\n]/%[^\n]" , ia, mask);
 	if ( !inet_pton(AF_INET, ia, &g_ia_local) )
-		return	$LOG(STS$K_ERROR, "Error converting IA=%s from %.*s", ia, $ASCPTR(&g_locaddr));
+		return	$LOG(STS$K_ERROR, "Error converting IA=%s from %.*s", ia, $ASCPTR(&q_locaddr));
 
-	status = sscanf($ASCPTR(&g_keepalive), "%d , %d" , &g_timers_set.t_ping.tv_sec, &g_timers_set.retry);
+	status = sscanf($ASCPTR(&q_keepalive), "%d , %d" , &g_timers_set.t_ping.tv_sec, &g_timers_set.retry);
 
 	/* FIFO channel to put statistic vector */
-	$ASCLEN(&g_fifo) = (unsigned char) snprintf($ASCPTR(&g_fifo), ASC$K_SZ, "/tmp/svpn-%.*s", $ASC(&g_tun));
+	$ASCLEN(&q_fifo) = (unsigned char) snprintf($ASCPTR(&q_fifo), ASC$K_SZ, "/tmp/svpn-%.*s", $ASC(&q_tun));
 
-	if ( mkfifo($ASCPTR(&g_fifo), 0777) && (errno != EEXIST) )
-		$LOG(STS$K_ERROR, "mkfifo(%.*s), errno=%d", $ASC(&g_fifo), errno);
-	else	$LOG(STS$K_SUCCESS, "FIFO device '%.*s' has been created", $ASC(&g_fifo));
+	if ( mkfifo($ASCPTR(&q_fifo), 0777) && (errno != EEXIST) )
+		$LOG(STS$K_ERROR, "mkfifo(%.*s), errno=%d", $ASC(&q_fifo), errno);
+	else	$LOG(STS$K_SUCCESS, "FIFO device '%.*s' has been created", $ASC(&q_fifo));
 
 	/* Make file name for tunnel volume of traffic */
 	if ( $ASCLEN(&q_fstat) )
@@ -571,26 +661,26 @@ char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64], fspec[255];
 		if ( !(cp = dirname( fn)) )
 			cp = "./";
 
-		$ASCLEN(&g_volume) = (unsigned char) snprintf($ASCPTR(&g_volume), ASC$K_SZ, "%s/volume-%.*s.dat", cp, $ASC(&g_tun));
+		$ASCLEN(&q_volume) = (unsigned char) snprintf($ASCPTR(&q_volume), ASC$K_SZ, "%s/volume-%.*s.dat", cp, $ASC(&q_tun));
 
-		$LOG(STS$K_SUCCESS, "Keep volume traffic for device in '%.*s', volume limits is %llu (0 - unlimited)", $ASC(&g_volume), g_data_volume_limit);
+		$LOG(STS$K_SUCCESS, "Keep volume traffic for device in '%.*s', volume limits is %llu (0 - unlimited)", $ASC(&q_volume), g_data_volume_limit);
 
 		/*
 		 * Check for existen Data Volume file and load value from it
 		 */
-		if ( 0 > (fd = open($ASCPTR(&g_volume), O_RDONLY)) )
-			$LOG(STS$K_WARN, "open(%s), errno=%d", $ASCPTR(&g_volume), errno);
+		if ( 0 > (fd = open($ASCPTR(&q_volume), O_RDONLY)) )
+			$LOG(STS$K_WARN, "open(%s), errno=%d", $ASCPTR(&q_volume), errno);
 		else if ( sizeof(g_data_volume) != read (fd, &g_data_volume, sizeof(g_data_volume)) )
-			$LOG(STS$K_ERROR, "read(%s, %d octets), errno=%d", $ASCPTR(&g_volume), sizeof(g_data_volume), errno);
+			$LOG(STS$K_ERROR, "read(%s, %d octets), errno=%d", $ASCPTR(&q_volume), sizeof(g_data_volume), errno);
 		else	$IFTRACE(g_trace, "Current Data Volume is %llu octets", g_data_volume);
 
 		close(fd);
 		}
 
 	/* /MODEUN=TAP|[TUN] */
-	if ( $ASCLEN(&g_tunmode) >= 2 )
+	if ( $ASCLEN(&q_tunmode) >= 2 )
 		{
-		cp  = $ASCPTR(&g_tunmode);
+		cp  = $ASCPTR(&q_tunmode);
 		cp++;
 
 		switch ( toupper(*cp))
@@ -604,7 +694,7 @@ char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64], fspec[255];
 				break;
 
 			default:
-				$LOG(STS$K_ERROR, "Unrecognized TUN's mode='%.*s'", $ASC(&g_tunmode));
+				$LOG(STS$K_ERROR, "Unrecognized TUN's mode='%.*s'", $ASC(&q_tunmode));
 
 			}
 		}
@@ -614,75 +704,20 @@ char	*cp, *saveptr = NULL, *endptr = NULL, ia [ 64 ], mask [ 64], fspec[255];
 	return	STS$K_SUCCESS;
 }
 
-#if	0
-int	stat_write	(void)
+
+
+void	stat_write2file	(void)
 {
+SVPN_STAT_REC	strec = {0};
+SVPN_STAT	sttmp = {0};
 struct	tm	tmnow = {0};
-char	fname [ NAME_MAX] = {0};
-static SVPN_STAT	lstat = {0};
-SVPN_STAT	delta_stat = {0};
-struct iovec iov [] = { {&tmnow, sizeof(tmnow)}, {&lstat, sizeof(lstat)} };
-int	fd = -1, iovlen = sizeof(tmnow) + sizeof(g_stat);
-
-	$IFTRACE(g_trace, "Stat file/path '%.*s'", $ASC(&q_fstat) );
-
-	if ( !$ASCLEN(&q_fstat) )
-		return	STS$K_SUCCESS;
-
-	/* Make a vector with differential counters */
-	__util$timbuf(NULL, &delta_stat.ts);			/* Current time stamp	*/
-
-	delta_stat.bnetrd	= g_stat.bnetrd - lstat.bnetrd;
-	delta_stat.bnetwr	= g_stat.bnetwr - lstat.bnetwr;
-	delta_stat.btunrd	= g_stat.btunrd - lstat.btunrd;
-	delta_stat.btunwr	= g_stat.btunwr - lstat.btunwr;
-
-	delta_stat.pnetrd	= g_stat.pnetrd - lstat.pnetrd;
-	delta_stat.pnetwr	= g_stat.pnetwr - lstat.pnetwr;
-	delta_stat.ptunrd	= g_stat.ptunrd - lstat.ptunrd;
-	delta_stat.ptunwr	= g_stat.ptunwr - lstat.ptunwr;
-
-	lstat = g_stat;
-
-	/* Generate a final file specification by adding year and month at end of file specification from configuration option:
-	 * e.g. :
-	 *	./tmp/starlet-zilla/tun135.stat
-	 * -->
-	 *	./tmp/starlet-zilla/tun135.stat-2019-01
-	 */
-	__util$timbuf(NULL, &tmnow);
-	sprintf(fname, "%.*s-%04d-%02d", $ASC(&q_fstat), tmnow.tm_year, tmnow.tm_mon);
-
-	$IFTRACE(g_trace, "Writting statistic to '%s'", fname );
-
-	if ( 0 > (fd = open (fname, O_CREAT | O_WRONLY | O_APPEND, f_mode)) )
-		return	$LOG(STS$K_ERROR, "open(%s)->%d, errno=%d", fname, fd, errno);
-
-
-	/* Write record: <timespec> <stat vector> */
-	if ( iovlen  != writev(fd, iov, $ARRSZ(iov)) )
-		return	$LOG(STS$K_ERROR, "Statistic write error, writev(%s, %d octets), errno=%d", fname, iovlen, errno);
-
-	close(fd);
-
-	$IFTRACE(g_trace, "Statistic (%d octets) has been saved '%s'", iovlen, fname );
-
-	return	STS$K_SUCCESS;
-}
-#endif
-
-
-
-void	stat_update	(void)
-{
-SVPN_VSTAT vstat = {0};
-SVPN_STAT rec_stat = {0};
-struct	tm	tmnow = {0};
-char	fname [ NAME_MAX] = {0};
-struct iovec iov [] = { {&tmnow, sizeof(struct	tm)}, {&rec_stat, sizeof(SVPN_STAT)} };
-int	fd = -1, iovlen = sizeof(struct tm) + sizeof(g_stat);
+char	fname [ NAME_MAX] = {0}, buf[512];
+int	fd = -1, len, status;
 static struct timespec tslast = {0};
 struct timespec tsnow = {0}, tsdelta = {0};
+
+	if ( !$ASCLEN(&q_fstat) )
+		return;
 
 	/* Current time stamp	*/
 	__util$timbuf(NULL, &tmnow);
@@ -690,104 +725,178 @@ struct timespec tsnow = {0}, tsdelta = {0};
 
 	__util$sub_time (&tsnow, &tslast, &tsdelta);
 
-
-	if ( $ASCLEN(&q_fstat) && (tsdelta.tv_sec > g_deltaonline) )
-		{
-		tslast = tsnow;
-
-		$IFTRACE(g_trace, "Stat file/path '%.*s'", $ASC(&q_fstat) );
-
-		/* Make a vector with differential counters */
-		rec_stat.bnetrd	= g_stat.bnetrd - g_stat_last.bnetrd;
-		rec_stat.bnetwr	= g_stat.bnetwr - g_stat_last.bnetwr;
-		rec_stat.btunrd	= g_stat.btunrd - g_stat_last.btunrd;
-		rec_stat.btunwr	= g_stat.btunwr - g_stat_last.btunwr;
-
-		rec_stat.pnetrd	= g_stat.pnetrd - g_stat_last.pnetrd;
-		rec_stat.pnetwr	= g_stat.pnetwr - g_stat_last.pnetwr;
-		rec_stat.ptunrd	= g_stat.ptunrd - g_stat_last.ptunrd;
-		rec_stat.ptunwr	= g_stat.ptunwr - g_stat_last.ptunwr;
-
-		/* Check that statistic vector is not zero */
-		if ( !__util$iszero (&rec_stat, sizeof(rec_stat)) )
-			{
-			/* Generate a final file specification by adding year and month at end of file specification from configuration option:
-			 * e.g. :
-			 *	./tmp/starlet-zilla/tun135.stat
-			 * -->
-			 *	./tmp/starlet-zilla/tun135.stat-2019-01
-			 */
-			sprintf(fname, "%.*s-%04d-%02d", $ASC(&q_fstat), tmnow.tm_year, tmnow.tm_mon);
-
-			$IFTRACE(g_trace, "Writting statistic to '%s'", fname );
-
-			if ( 0 > (fd = open (fname, O_CREAT | O_WRONLY | O_APPEND, f_mode)) )
-				$LOG(STS$K_ERROR, "open(%s)->%d, errno=%d", fname, fd, errno);
-
-			else if ( iovlen  != writev(fd, iov, $ARRSZ(iov)) )		/* Write record: <timespec> <stat vector> */
-				$LOG(STS$K_ERROR, "Statistic write error, writev(#%d, %s, %d octets), errno=%d", fd, fname, iovlen, errno);
-
-			else	$IFTRACE(g_trace, "Statistic (%d octets) has been saved '%s'", iovlen, fname );
-
-			close(fd);
-			}
-		}
-
-
-
-	if ( $ASCLEN(&g_fifo) )
-		{
-
-		/* Update stat vector with computed bandwidth counters,
-		 * it's not correct way to use atomic values but is acceptable at glance
-		*/
-		vstat.bnetrd = g_stat.bnetrd - g_stat_last.bnetrd;
-		vstat.bnetwr = g_stat.bnetwr - g_stat_last.bnetwr;
-
-		vstat.pnetrd = g_stat.pnetrd - g_stat_last.pnetrd;
-		vstat.pnetwr = g_stat.pnetwr - g_stat_last.pnetwr;
-
-		vstat.rtt = g_rtt;
-
-		__util$sub_time(&g_stat.ts, &g_stat_last.ts, &vstat.delta);
-		vstat.delta = vstat.delta.tv_sec ? vstat.delta : g_timers_set.t_ping;
-
-
-		/* Open FIFO device, write stat vector record, close */
-		if( access($ASCPTR(&g_fifo), F_OK | W_OK) )
-			{
-			if ( 0 > (fd = open($ASCPTR(&g_fifo), O_WRONLY | O_NONBLOCK)) )
-				$IFTRACE(g_trace && (errno != ENXIO),  "open(%.*s), errno=%d", $ASC(&g_fifo), errno);
-			else if ( sizeof(SVPN_VSTAT) != write(fd, &vstat, sizeof(SVPN_VSTAT)) )
-				$IFTRACE(g_trace, "write(%.*s, %d octets), errno=%d", $ASC(&g_fifo), sizeof(vstat), errno);
-
-			if ( !(fd < 0) )
-				close(fd);
-			}
-		}
-
-
-	/* Adjust total data traffic volume */
-	g_data_volume	+= g_stat.bnetrd;
-	g_data_volume	+= g_stat.bnetwr;
+	/*
+	 * Save statistic counters at interval basis;
+	 * if exit flags is set - flush unconditionaly!
+	 */
+	if ( (!g_exit_flag) &&  (tsdelta.tv_sec < g_deltastat) )
+		return;
 
 	/*
-	 * Update Data Volume counter in the file
+	** Make a local copy of the STAT Vector, eg sttmp = g_stat;
+	*/
+	sttmp.bnetrd = atomic_load(&g_stat.bnetrd);
+	sttmp.bnetwr = atomic_load(&g_stat.bnetwr);
+	sttmp.btunrd = atomic_load(&g_stat.btunrd);
+	sttmp.btunwr = atomic_load(&g_stat.btunwr);
+
+	sttmp.pnetrd = atomic_load(&g_stat.pnetrd);
+	sttmp.pnetwr = atomic_load(&g_stat.pnetwr);
+	sttmp.ptunrd = atomic_load(&g_stat.ptunrd);
+	sttmp.ptunwr = atomic_load(&g_stat.ptunwr);
+
+	tslast = tsnow;
+
+	/* Make a vector with differential counters */
+	strec.bnetrd	= sttmp.bnetrd - g_stlast1.bnetrd;
+	strec.bnetwr	= sttmp.bnetwr - g_stlast1.bnetwr;
+	strec.btunrd	= sttmp.btunrd - g_stlast1.btunrd;
+	strec.btunwr	= sttmp.btunwr - g_stlast1.btunwr;
+
+	strec.pnetrd	= sttmp.pnetrd - g_stlast1.pnetrd;
+	strec.pnetwr	= sttmp.pnetwr - g_stlast1.pnetwr;
+	strec.ptunrd	= sttmp.ptunrd - g_stlast1.ptunrd;
+	strec.ptunwr	= sttmp.ptunwr - g_stlast1.ptunwr;
+
+	/* Check that statistic vector is not zero */
+	if ( 1 & __util$iszero (&strec, sizeof(strec)) )
+		return;
+
+	strec.tmrec	= tmnow;
+
+	/* Generate a final file specification by adding year and month at end of file specification from configuration option:
+	 * e.g. :
+	 *	./tmp/starlet-zilla/tun135.stat
+	 * -->
+	 *	./tmp/starlet-zilla/tun135.stat-2019-01
 	 */
-	if ( $ASCLEN(&g_volume)  )
+	snprintf(fname, sizeof(fname), "%.*s-%04d-%02d", $ASC(&q_fstat), tmnow.tm_year, tmnow.tm_mon);
+
+	$IFTRACE(g_trace, "Writting statistic to '%s'", fname );
+
+	$IFTRACE(g_trace, "TUN RD: %llu packets, %llu octets, WR: %llu packets, %llu octets", strec.ptunrd, strec.btunrd, strec.ptunwr, strec.btunwr);
+	$IFTRACE(g_trace, "NET RD: %llu packets, %llu octets, WR: %llu packets, %llu octets", strec.pnetrd, strec.bnetrd, strec.pnetwr, strec.bnetwr);
+
+	if ( 0 > (fd = open (fname, O_CREAT | O_WRONLY | O_APPEND, fileprot)) )
+		$LOG(STS$K_ERROR, "open(%s)->%d, errno=%d", fname, fd, errno);
+
+	else if ( sizeof(strec)  != write(fd, &strec, sizeof(strec)) )		/* Write record: <timespec> <stat vector> */
+		$LOG(STS$K_ERROR, "Statistic write error, writev(#%d, %s, %d octets), errno=%d", fd, fname, sizeof(strec), errno);
+
+	else	$IFTRACE(g_trace, "Statistic (%d octets) has been saved '%s'", sizeof(strec), fname );
+
+	close(fd);
+
+
+	if ( !(g_t4fd < 0 ) )					/* Write T4 stuff is file descriptor has been ready */
 		{
-		if ( 0 > (fd = open($ASCPTR(&g_volume), O_WRONLY | O_CREAT, f_mode)) )
-			$LOG(STS$K_ERROR, "open(%s), errno=%d", $ASCPTR(&g_volume), errno);
-		else if ( sizeof(g_data_volume) != write (fd, &g_data_volume, sizeof(g_data_volume)) )
-			$LOG(STS$K_ERROR, "write(%s, %d octets), errno=%d", $ASCPTR(&g_volume), sizeof(g_data_volume), errno);
+		len = snprintf(buf, sizeof(buf), t4rec,
+			       tmnow.tm_mday, tmnow.tm_mon , tmnow.tm_year,  tmnow.tm_hour, tmnow.tm_min, tmnow.tm_sec,
+			       sttmp.bnetrd, sttmp.bnetwr,
+			       sttmp.btunrd, sttmp.btunwr,
+			       sttmp.ptunrd, sttmp.ptunwr,
+			       atomic_load(&g_stat_p128), atomic_load(&g_stat_p256), atomic_load(&g_stat_p512));
+
+		if ( len != (status = write(g_t4fd, buf, len)) )
+			$LOG(STS$K_ERROR, "T4 - write(%s, %d octets)->%d, errno=%d", g_t4fd, len, status, errno);
+		}
+
+	/* Save current counters for future use */
+	g_stlast1 = sttmp;
+}
+
+
+void	stat_write2fifo	(void)
+{
+SVPN_VSTAT vstat = {0};
+int	fd = -1;
+
+	if ( !$ASCLEN(&q_fifo) )
+		return;
+
+	/* Update stat vector with computed bandwidth counters,
+	 * it's not correct way to use atomic values but is acceptable at glance
+	*/
+	vstat.bnetrd = atomic_load(&g_stat.bnetrd);
+	vstat.bnetwr = atomic_load(&g_stat.bnetwr);
+
+	vstat.pnetrd = atomic_load(&g_stat.pnetrd);
+	vstat.pnetwr = atomic_load(&g_stat.pnetwr);
+
+	vstat.rtt = g_rtt;
+
+	/* Open FIFO device, write stat vector record, close */
+	if( !access($ASCPTR(&q_fifo), F_OK | W_OK) )
+		{
+		if ( 0 > (fd = open($ASCPTR(&q_fifo), O_WRONLY | O_NONBLOCK)) )
+			$IFTRACE(g_trace && (errno != ENXIO),  "open(%.*s), errno=%d", $ASC(&q_fifo), errno);
+		else if ( sizeof(SVPN_VSTAT) != write(fd, &vstat, sizeof(SVPN_VSTAT)) )
+			$IFTRACE(g_trace, "write(%.*s, %d octets), errno=%d", $ASC(&q_fifo), sizeof(vstat), errno);
 
 		if ( !(fd < 0) )
 			close(fd);
 		}
+	else	$IFTRACE(g_trace, "access(%.*s), errno=%d", $ASC(&q_fifo), errno);
+}
+
+
+void	stat_adjust_volume	(void)
+{
+SVPN_STAT strec = {0}, sttmp = {0};
+static SVPN_STAT g_stlast2 = {0};
+int	fd = -1;
+
+	if ( !$ASCLEN(&q_volume)  )
+		return;
+
+	/*
+	** Make a local copy of the STAT Vector,
+	** it's not very atomic ...
+	*/
+	sttmp = g_stat;
+
+	/* Make a vector with differential counters */
+	strec.bnetrd	= sttmp.bnetrd - g_stlast2.bnetrd;
+	strec.bnetwr	= sttmp.bnetwr - g_stlast2.bnetwr;
+
+	strec.pnetrd	= sttmp.pnetrd - g_stlast2.pnetrd;
+	strec.pnetwr	= sttmp.pnetwr - g_stlast2.pnetwr;
+
+	/* Adjust total data traffic volume */
+	g_data_volume	+= sttmp.bnetrd;
+	g_data_volume	+= sttmp.bnetwr;
+
+	/*
+	 * Update Data Volume counter in the file
+	 */
+	if ( 0 > (fd = open($ASCPTR(&q_volume), O_WRONLY | O_CREAT, fileprot)) )
+		$LOG(STS$K_ERROR, "open(%s), errno=%d", $ASCPTR(&q_volume), errno);
+	else if ( sizeof(g_data_volume) != write (fd, &g_data_volume, sizeof(g_data_volume)) )
+		$LOG(STS$K_ERROR, "write(%s, %d octets), errno=%d", $ASCPTR(&q_volume), sizeof(g_data_volume), errno);
+
+	if ( !(fd < 0) )
+		close(fd);
 
 	/* Save current counters for future use */
-	g_stat_last = g_stat;
+	g_stlast2 = sttmp;
 }
+
+
+void	stat_update	(void)
+{
+	if ( $ASCLEN(&q_fstat) )
+		stat_write2file();
+
+	if ( $ASCLEN(&q_fifo) )
+		stat_write2fifo();
+
+	if ( $ASCLEN(&q_volume)  )
+		stat_adjust_volume();
+}
+
+
+
+
 
 /*
  * change TCP MSS option in SYN/SYN-ACK packets, if present
@@ -997,7 +1106,23 @@ struct iphdr	*iph = (struct iphdr *) buf;
 }
 
 
-
+/*
+ *
+ *   DESCRIPTION: Intialize a network leg of the tunnel - create UDP socket with specified configuration parameters.
+ *
+ *   IPLICITE INPUTS:
+ *	g_bind
+ *
+ *   IPLICITE OUTPUTS:
+ *	g_server_sq
+ *
+ *   OUTPUTS:
+ *	sd:	UDP created socket descriptor
+ *
+ *   RETURNS:
+ *	condition code
+ *
+ */
 
 
 
@@ -1013,7 +1138,7 @@ socklen_t slen = sizeof(struct sockaddr);
 
 	g_server_sk.sin_port = htons(SVPN$K_DEFPORT);
 
-	if ( sscanf($ASCPTR(&g_bind), "%32[^:\n]:%8[0-9]", ia, pn) )
+	if ( sscanf($ASCPTR(&q_bind), "%32[^:\n]:%8[0-9]", ia, pn) )
 		{
 		if (  (npn = atoi(pn)) )
 			g_server_sk.sin_port = htons(npn);
@@ -1021,9 +1146,9 @@ socklen_t slen = sizeof(struct sockaddr);
 		if ( 0 > (status = inet_pton(AF_INET, ia, &g_server_sk.sin_addr)) )
 				return	$LOG(STS$K_ERROR, "inet_pton(%s)->%d, errno=%d", ia, status, errno);
 		}
-	else	return	$LOG(STS$K_ERROR, "Illegal or illformed IP:Port (%.*s)", $ASC(&g_bind));
+	else	return	$LOG(STS$K_ERROR, "Illegal or illformed IP:Port (%.*s)", $ASC(&q_bind));
 
-	inet_ntop(AF_INET, &g_server_sk.sin_addr, ia, slen);
+	inet_ntop(AF_INET, &g_server_sk.sin_addr, ia, sizeof(ia));
 
 	$LOG(STS$K_INFO, "Initialize listener on : %s:%d", ia, ntohs(g_server_sk.sin_port));
 
@@ -1071,7 +1196,7 @@ static int	sd = -1;
 			return	$LOG(STS$K_FATAL, "socket(), errno=%d", errno);
 		}
 
-	strncpy(ifr.ifr_name, $ASCPTR(&g_tun), IFNAMSIZ);
+	strncpy(ifr.ifr_name, $ASCPTR(&q_tun), IFNAMSIZ);
 
 	/* DOWN the TUN/TAP device */
 	if( ioctl(sd, SIOCGIFFLAGS, &ifr) )
@@ -1107,7 +1232,7 @@ struct sockaddr_in inaddr = {0};
 	*        IFF_MULTI_QUEUE - Create a queue of multiqueue device
 	*/
 	ifr.ifr_flags = g_tunflags  /*IFF_TAP*/ | IFF_NO_PI | IFF_MULTI_QUEUE;
-	strncpy(ifr.ifr_name, $ASCPTR(&g_tun), IFNAMSIZ);
+	strncpy(ifr.ifr_name, $ASCPTR(&q_tun), IFNAMSIZ);
 
 	/* Allocate new /devtunX ... */
 	if ( 0 > (*fd = open("/dev/net/tun", O_RDWR)) )
@@ -1188,7 +1313,7 @@ int	err, sd = -1, fd = -1;
 	*        IFF_MULTI_QUEUE - Create a queue of multiqueue device
 	*/
 	ifr.ifr_flags = g_tunflags  /*IFF_TAP*/ | IFF_NO_PI | IFF_MULTI_QUEUE;
-	strncpy(ifr.ifr_name, $ASCPTR(&g_tun), IFNAMSIZ);
+	strncpy(ifr.ifr_name, $ASCPTR(&q_tun), IFNAMSIZ);
 
 	/* Allocate new /devtunX ... */
 	if ( 0 > (fd = open("/dev/net/tun", O_RDWR)) )
@@ -1234,7 +1359,7 @@ int	err;
 	*        IFF_MULTI_QUEUE - Create a queue of multiqueue device
 	*/
 	ifr.ifr_flags = g_tunflags  /*IFF_TAP*/ | IFF_NO_PI | IFF_MULTI_QUEUE;
-	strncpy(ifr.ifr_name, $ASCPTR(&g_tun), IFNAMSIZ);
+	strncpy(ifr.ifr_name, $ASCPTR(&q_tun), IFNAMSIZ);
 
 	if ( 0 > (*fd = open("/dev/net/tun", O_RDWR)) )
 		return	$LOG(STS$K_ERROR, "open(/dev/net/tun), errno=%d", errno);
@@ -1254,12 +1379,13 @@ int	err;
 /*
 **  DESCRIPTION: Compute time from timespec to milisecond - input for poll()
 **
-**  INPUT:
+**  INPUTS:
 **	src:	source time in timespec format
 **
-**  OUTPUT: NONE
+**  OUTPUTS:
+**	NONE
 **
-**  RETURN:
+**  RETURNS:
 **	time in miliseconds
 **
 */
@@ -1278,18 +1404,18 @@ inline static int timespec2msec (
  *		but no more then timeout. Optionaly check address of sender.
  *		If from.sin_addr == INADDR_ANY - accept UDP datagram from any source
  *
- *   INPUT:
+ *   INPUTS:
  *	sd:	Network socket descriptor
  *	buf:	A buffer to accept data
  *	bufsz:	A number of bytes to be read
  *	from:	Remote sender socket to check
  *
- *  OUTPUT:
+ *  OUTPUTS:
  *	buf:	Received data
  *	retlen:	A length of data has been received to the buffer
  *	from:	Remote sender socket
  *
- *  RETURN:
+ *  RETURNS:
  *	condition code, see STS$K_* constant
  */
 static inline	int recv_pkt
@@ -1371,6 +1497,11 @@ int	slen = sizeof(struct sockaddr_in);
 
 			*retlen = status;
 			*from = rsock;
+
+			atomic_fetch_add(&g_stat.bnetrd, status);
+			atomic_fetch_add(&g_stat.bnetrd, sizeof (struct iphdr) + sizeof (struct udphdr));
+			atomic_fetch_add(&g_stat.pnetrd, 1);
+
 			return	STS$K_SUCCESS; /* Bingo! We has been received a requested amount of data */
 			}
 
@@ -1393,15 +1524,15 @@ int	slen = sizeof(struct sockaddr_in);
  *   DESCRIPTION: Write specified number of bytes to the network socket, wait if not all data has been get
  *		but no more then timeout;
  *
- *   INPUT:
+ *   INPUTS:
  *	sd:	Network socket descriptor
  *	buf:	A buffer with data to be sent
  *	bufsz:	A number of bytes to be read
  *
- *  OUTPUT:
+ *  OUTPUTS:
  *	NONE
  *
- *  RETURN:
+ *  RETURNS:
  *	condition code, see STS$K_* constant
  */
 static inline int	xmit_pkt
@@ -1424,6 +1555,9 @@ char	*bufp = (char *) buf;
 	if ( !bufsz )
 		return	STS$K_SUCCESS;
 
+	atomic_fetch_add(&g_stat.bnetwr, bufsz);
+	atomic_fetch_add(&g_stat.bnetwr, sizeof (struct iphdr) + sizeof (struct udphdr));
+	atomic_fetch_add(&g_stat.pnetwr, 1);
 
 	/* Compute an end of I/O operation time	*/
 #ifdef WIN32
@@ -1637,13 +1771,13 @@ static int	worker	(void)
 int	rc, td = -1, slen = sizeof(struct sockaddr_in);
 struct pollfd pfd[] = {{g_udp_sd, POLLIN, 0 }, {0, POLLIN, 0}};
 struct	sockaddr_in rsock = {0};
-char	buf [SVPN$SZ_IOBUF];
+char	buf [SVPN$SZ_IOBUF], sfrom[32];
 SVPN_PDU *pdu = (SVPN_PDU *) buf;
 struct	timespec now = {0}, etime = {0}, delta = {13, 0};
 struct iphdr *iph;
 
 	/* Place of the IP's Header in the network packet depending on TUN's mode */
-	iph = g_tunflags & IFF_TAP ? &buf[ETH_HLEN] : buf;
+	iph = (g_tunflags & IFF_TAP) ? &buf[ETH_HLEN] : buf;
 
 
 	/* Open channel to TUN device */
@@ -1664,14 +1798,12 @@ struct iphdr *iph;
 		 * so we should check that g_state == SVPN$K_STATETUN, in any other case we hibernate execution until
 		 * signal.
 		 */
-
 		if ( g_state != SVPN$K_STATETUN )
 			{
 			if ( rc = clock_gettime(CLOCK_REALTIME, &now) )
 				g_exit_flag = $LOG(STS$K_ERROR, "[#%d]clock_gettime()->%d, errno=%d", td, rc, errno);
 
 			__util$add_time(&now, &delta, &etime);
-
 
 			pthread_mutex_lock(&crew_mtx);
 			rc = pthread_cond_timedwait(&crea_cond, &crew_mtx, &etime);
@@ -1702,7 +1834,7 @@ struct iphdr *iph;
 			return	$LOG(STS$K_ERROR, "[#%d-#%d]poll()->%d, errno=%d", td, g_udp_sd, rc, __ba_errno__);
 
 
-		if ( !rc )	/* Nothing to do */
+		if ( !rc )	/* No I/O evemts (!?) -   nothing to do ! */
 			continue;
 
 #ifdef WIN32
@@ -1726,11 +1858,22 @@ struct iphdr *iph;
 
 		if ( (pfd[0].revents & POLLIN) && (0 < (rc = recvfrom(g_udp_sd, buf, sizeof(buf), 0, &rsock, &slen))) )
 			{
+			/* Special check for unordered LOGIN, or LOGIN from a yet another client */
+			if ( (pdu->magic64 == *magic64) && (pdu->req == SVPN$K_REQ_LOGIN) )
+				{
+				inet_ntop(AF_INET, &rsock.sin_addr, sfrom, sizeof(sfrom));
+				$LOG(STS$K_ERROR, "[#%d]Ignore LOGIN request from %s:%d, multiple sessions is not supported", g_udp_sd, sfrom, ntohs(rsock.sin_port));
+
+				continue;	/* Skip rest of processing! */
+				}
+
 			/* Check sender IP, ignore unrelated packets ... */
 			if ( g_client_sk.sin_addr.s_addr != rsock.sin_addr.s_addr )
 				continue;
 
+
 			atomic_fetch_add(&g_stat.bnetrd, rc);
+			atomic_fetch_add(&g_stat.bnetrd, sizeof (struct iphdr) + sizeof (struct udphdr));
 			atomic_fetch_add(&g_stat.pnetrd, 1);
 
 			/* Is it's control packet begined with the magic prefix  ? */
@@ -1755,8 +1898,7 @@ struct iphdr *iph;
 						$LOG(STS$K_ERROR, "Close tunnel on control sequence");
 					}
 
-				/* Skip rest of processing */
-				continue;
+				continue;	/* Skip rest of processing!  */
 				}
 
 
@@ -1768,8 +1910,18 @@ struct iphdr *iph;
 			if ( rc != write(td, buf, rc) )
 				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on TUN device, write(%d octets), errno=%d", td, g_udp_sd, rc, __ba_errno__);
 
+			/* Adjust statistic counters ... */
+			if ( rc < 128 )
+				atomic_fetch_add(&g_stat_p128, 1);
+			else if ( rc < 256 )
+				atomic_fetch_add(&g_stat_p256, 1);
+			else if ( rc < 512 )
+				atomic_fetch_add(&g_stat_p512, 1);
+
 			atomic_fetch_add(&g_stat.btunwr, rc);
 			atomic_fetch_add(&g_stat.ptunwr, 1);
+
+			$IFTRACE(g_trace, "TUN WR %d octets", rc);
 			}
 #ifdef WIN32
 		else if ( (0 >= rc) && (errno != WSAEINPROGRESS) )
@@ -1785,27 +1937,33 @@ struct iphdr *iph;
 		/* Retrieve data from TUN device -> send to UDP socket */
 		if ( (pfd[1].revents & POLLIN) && (0 < (rc = read (td, buf, sizeof(buf)))) )
 			{
-
-			slen = sizeof(struct sockaddr_in);
+			/* Adjust statistic counters ... */
+			if ( rc < 128 )
+				atomic_fetch_add(&g_stat_p128, 1);
+			else if ( rc < 256 )
+				atomic_fetch_add(&g_stat_p256, 1);
+			else if ( rc < 512 )
+				atomic_fetch_add(&g_stat_p512, 1);
 
 			atomic_fetch_add(&g_stat.btunrd, rc);
 			atomic_fetch_add(&g_stat.ptunrd, 1);
 
+			$IFTRACE(g_trace, "TUN RD %d octets", rc);
 
 			/* TCP's MSS Fixup */
 			if ( g_mss && (iph->protocol == IPPROTO_TCP) )
-				{
 				mss_fixup (iph, g_tunflags & IFF_TAP ?  rc - ETHER_HDR_LEN : rc , g_mss);
-				}
 
 			if ( g_enc != SVPN$K_ENC_NONE )
 				encode(g_enc, buf, rc, g_key, sizeof(g_key));
 
-			if ( rc != sendto(g_udp_sd, buf, rc, 0, &g_client_sk, slen) )
+			if ( rc != sendto(g_udp_sd, buf, rc, 0, &g_client_sk, sizeof(struct sockaddr_in)) )
 				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on UDP socket, sendto(%d octets), errno=%d", td, g_udp_sd, rc, errno);
 
-			atomic_fetch_add(&g_stat.btunwr, rc);
-			atomic_fetch_add(&g_stat.ptunwr, 1);
+			/* Adjust statistic counters ... */
+			atomic_fetch_add(&g_stat.bnetwr, rc);
+			atomic_fetch_add(&g_stat.bnetwr, sizeof (struct iphdr) + sizeof (struct udphdr));
+			atomic_fetch_add(&g_stat.pnetwr, 1);
 			}
 		else
 #ifdef WIN32
@@ -1815,9 +1973,7 @@ struct iphdr *iph;
 #endif
 				$LOG(STS$K_ERROR, "[#%d-#%d]recv()->%d, UDP/TUN.revents=%08x/%08x, errno=%d",
 						td, g_udp_sd, rc, pfd[0].revents, pfd[1].revents, __ba_errno__);
-
 		}
-
 
 	$IFTRACE(g_trace, "Terminated");
 }
@@ -1932,7 +2088,7 @@ struct sockaddr_in from = {0};
 
 	/* Check  HMAC*/
 	if ( !(1 & hmac_check(pdu->digest, SVPN$SZ_DIGEST,
-			pdu, SVPN$SZ_HASHED, pdu->data, buflen - SVPN$SZ_PDUHDR, $ASCPTR(&g_auth), $ASCLEN(&g_auth),
+			pdu, SVPN$SZ_HASHED, pdu->data, buflen - SVPN$SZ_PDUHDR, $ASCPTR(&q_auth), $ASCLEN(&q_auth),
 				NULL /* End-of-arguments marger !*/)) )
 		return	$LOG(STS$K_ERROR, "[#%d]Autorization error", g_udp_sd);
 
@@ -1958,17 +2114,17 @@ struct sockaddr_in from = {0};
 
 
 	/* Add configuration options for remote SVPN instance ... */
-	if ( $ASCLEN(&g_cliname) )
+	if ( $ASCLEN(&q_cliname) )
 		{
-		if ( !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_NAME, SVPN$K_BBLOCK, $ASCPTR(&g_cliname), $ASCLEN(&g_cliname), &adjlen))) )
+		if ( !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_NAME, SVPN$K_BBLOCK, $ASCPTR(&q_cliname), $ASCLEN(&q_cliname), &adjlen))) )
 			return	$LOG(status, "[#%d]Error put attribute", g_udp_sd);
 		buflen += adjlen;
 		bufsz -= adjlen;
 		}
 
-	if ( $ASCLEN(&g_climsg) )
+	if ( $ASCLEN(&q_climsg) )
 		{
-		if (  !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_MSG, SVPN$K_BBLOCK, $ASCPTR(&g_climsg), $ASCLEN(&g_climsg), &adjlen))) )
+		if (  !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_MSG, SVPN$K_BBLOCK, $ASCPTR(&q_climsg), $ASCLEN(&q_climsg), &adjlen))) )
 			return	$LOG(status, "[#%d]Error put attribute", g_udp_sd);
 
 		buflen += adjlen;
@@ -2022,8 +2178,8 @@ struct sockaddr_in from = {0};
 
 	/* Generate  HMAC */
 	hmac_gen(pdu->digest, SVPN$SZ_DIGEST,
-			pdu, SVPN$SZ_HASHED, pdu->data, buflen - SVPN$SZ_PDUHDR, $ASCPTR(&g_auth), $ASCLEN(&g_auth),
-				NULL /* End-of-arguments marger !*/);
+			pdu, SVPN$SZ_HASHED, pdu->data, buflen - SVPN$SZ_PDUHDR, $ASCPTR(&q_auth), $ASCLEN(&q_auth),
+				NULL /* End-of-arguments marker !*/);
 
 	if ( !(1 & xmit_pkt (g_udp_sd, buf, buflen, &from)) )
 		return	$LOG(STS$K_ERROR, "Error send ACCEPT to %s:$d", sfrom, ntohs(from.sin_port));
@@ -2152,7 +2308,6 @@ int	main	(int argc, char **argv)
 {
 int	status, idle_count;
 pthread_t	tid;
-SVPN_STAT	l_stat = {0};
 char	buf[1024];
 struct timespec deltaonline = {0, 0}, now;
 
@@ -2165,9 +2320,9 @@ struct timespec deltaonline = {0, 0}, now;
 	 */
 	__util$getparams(argc, argv, optstbl);
 
-	if ( $ASCLEN(&g_logfspec) )
+	if ( $ASCLEN(&q_logfspec) )
 		{
-		__util$deflog($ASCPTR(&g_logfspec), NULL);
+		__util$deflog($ASCPTR(&q_logfspec), NULL);
 
 		$LOG(STS$K_INFO, "Rev: " __IDENT__ "/"  __ARCH__NAME__   ", (built  at "__DATE__ " " __TIME__ " with CC " __VERSION__ ")");
 		}
@@ -2197,7 +2352,7 @@ struct timespec deltaonline = {0, 0}, now;
 	init_sig_handler ();
 
 	/* Generate session key ... */
-	hmac_gen(g_key, sizeof(g_key), $ASCPTR(&g_auth), $ASCLEN(&g_auth), NULL);
+	hmac_gen(g_key, sizeof(g_key), $ASCPTR(&q_auth), $ASCLEN(&q_auth), NULL);
 
 	/* Create crew workers */
 	for ( int i = 0; i < g_threads; i++ )
@@ -2206,8 +2361,10 @@ struct timespec deltaonline = {0, 0}, now;
 			return	$LOG(STS$K_FATAL, "Cannot start worker thread, pthread_create()->%d, errno=%d", status, errno);
 		}
 
-
 	/**/
+	t4_open();
+
+
 	for ( idle_count = 0; !g_exit_flag; __util$rewindlogfile(g_logsize) )
 		{
 		if ( !atomic_flag_test_and_set(&reset_by_external_flag) )
@@ -2232,16 +2389,23 @@ struct timespec deltaonline = {0, 0}, now;
 			{
 			/* Reset seession specific counters */
 			idle_count = 0;
-			g_stat_last = g_stat = g_stat_zero;
+
+			g_stat = g_stlast1 = g_stlast2 = g_stat_zero;
+			atomic_store(&g_stat_p128, 0);
+			atomic_store(&g_stat_p256, 0);
+			atomic_store(&g_stat_p512, 0);
+
 			deltaonline.tv_sec = deltaonline.tv_nsec = 0;
+
 			g_outseq = g_inpseq = 0;
+
 			g_input_count = 0;
 
-			exec_script(&g_linkup);
+			exec_script(&q_linkup);
 
 			backlog_update (&g_client_sk.sin_addr);
 
-			g_state = SVPN$K_STATETUN;
+			g_state = SVPN$K_STATETUN;	/* Now we jump to TUNNELING state */
 			$LOG(STS$K_INFO, "IP: %s is ONLINE", inet_ntop(AF_INET, &g_client_sk.sin_addr, buf, sizeof(buf)));
 
 			/* Send signal to the workers ... */
@@ -2251,13 +2415,13 @@ struct timespec deltaonline = {0, 0}, now;
 			}
 
 
-		if ( g_state == SVPN$K_STATEOFF )	/* I/O workers should be hibernated, call external script,
+		if ( g_state == SVPN$K_STATEOFF )	/* I/O workers should be hibernated, call external script;
 							 * switch our state into the "wait for initial control requests"
 							 */
 			{
 			set_tun_state(0);	/* Down the tunX */
 
-			exec_script(&g_linkdown);
+			exec_script(&q_linkdown);
 
 			/* Write session statistic record */
 			//stat_write();
@@ -2322,8 +2486,6 @@ struct timespec deltaonline = {0, 0}, now;
 					}
 				}
 
-
-
 			}
 
 
@@ -2337,7 +2499,7 @@ struct timespec deltaonline = {0, 0}, now;
 		#endif // WIN32
 
 		$IFTRACE(g_trace, "TUN RD: %llu packets, %llu octets, WR: %llu packets, %llu octets", g_stat.ptunrd, g_stat.btunrd, g_stat.ptunwr, g_stat.btunwr);
-		$IFTRACE(g_trace, "UDP RD: %llu packets, %llu octets, WR: %llu packets, %llu octets", g_stat.ptunrd, g_stat.btunrd, g_stat.ptunwr, g_stat.btunwr);
+		$IFTRACE(g_trace, "NET RD: %llu packets, %llu octets, WR: %llu packets, %llu octets", g_stat.pnetrd, g_stat.bnetrd, g_stat.pnetwr, g_stat.bnetwr);
 
 		/* Save statistic, update state counters
 		 * Do we reach limit ?!
@@ -2350,7 +2512,7 @@ struct timespec deltaonline = {0, 0}, now;
 
 	set_tun_state(0);		/* Down the tunX */
 	tun_shut();
-	exec_script(&g_linkdown);	/* Switch /dev/tunX DOWN */
+	exec_script(&q_linkdown);	/* Switch /dev/tunX DOWN */
 	stat_update();
 
 	/* Get out !*/

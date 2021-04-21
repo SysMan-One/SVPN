@@ -27,6 +27,11 @@
 **
 **  MODIFICATION HISTORY:
 **
+**	14-MAY-2020	RRL	Removed delta field from VSTAT.
+**
+**	12-SEP-2020	RRL	Now structure of SVPN_STAT record  live here.
+**
+**	 3-OCT-2020	RRL	Added new TAG OPTIONS to carry capabilities.
 **
 **--
 */
@@ -39,56 +44,58 @@
 extern "C" {
 #endif
 
-#define	SVPN$SZ_IOBUF	2048	/* Default buffer size of the I/O */
-#define	SVPN$K_IOBUF	32	/* A number of buffers */
+#define	SVPN$SZ_IOBUF	2048			/* Default buffer size of the I/O */
+#define	SVPN$K_IOBUF	32			/* A number of buffers */
 #define	SVPN$SZ_USER	32
 #define	SVPN$SZ_PASS	32
-#define	SVPN$K_DEFPORT	1394	/* A default port sVPN			*/
+#define	SVPN$K_DEFPORT	1394			/* A default port sVPN			*/
 #define	SVPN$SZ_SALT	32
 #define	SVPN$SZ_MAXIPBLOG	32		/* A maximum entries in the IP Backlog file	*/
 
 enum	{
-	SVPN$K_PROTO_V1 = 1	/* A current version of the handshake protocol	*/
+	SVPN$K_PROTO_V1 = 1			/* A current version of the handshake protocol	*/
 };
 
 
 enum	{
-	SVPN$K_ENC_NONE = 0,	/* Encryption of data:	ZERO - no encryption */
-	SVPN$K_ENC_XOR,		/* XOR with static key	*/
-	SVPN$K_ENC_IDEA,	/* IDEA with PSK	*/
-	SVPN$K_ENC_TWOFISH,	/* TWOFISH with PSK	*/
+	SVPN$K_ENC_NONE = 0,			/* Encryption of data:	ZERO - no encryption */
+	SVPN$K_ENC_XOR,				/* XOR with static key	*/
+	SVPN$K_ENC_IDEA,			/* IDEA with PSK	*/
+	SVPN$K_ENC_TWOFISH,			/* TWOFISH with PSK	*/
+};
+
+#define	SVPN$K_OPT_AGGR	0x1			/* Aggregation		*/
+
+enum	{
+	SVPN$K_TAG_NAME = 1,			/* BBLOCK/ASCII	*/
+	SVPN$K_TAG_NET,				/* in_addr	*/
+	SVPN$K_TAG_NETMASK,			/* in_addr	*/
+	SVPN$K_TAG_CLIADDR,			/* in_addr	*/
+	SVPN$K_TAG_IDLE,			/* WORD		*/
+	SVPN$K_TAG_PING,			/* WORD		*/
+	SVPN$K_TAG_RETRY,			/* WORD		*/
+	SVPN$K_TAG_TOTAL,			/* WORD		*/
+	SVPN$K_TAG_ENC,				/* OCTET	*/
+	SVPN$K_TAG_TRACE,			/* OCTET	*/
+	SVPN$K_TAG_MSG,				/* BBLOCK/ASCII	*/
+	SVPN$K_TAG_USER,			/* BBLOCK/ASCII	*/
+	SVPN$K_TAG_TIME,			/* timespec	*/
+	SVPN$K_TAG_SEQ,				/* LONGWORD	*/
+	SVPN$K_TAG_REV,				/* BBLOCK/ASCII	*/
+	SVPN$K_TAG_TUNTYPE,			/* WORD		*/
+	SVPN$K_TAG_OPTS				/* LONGWORD	*/
 };
 
 
 enum	{
-	SVPN$K_TAG_NAME = 1,	/* BBLOCK/ASCII	*/
-	SVPN$K_TAG_NET,		/* in_addr	*/
-	SVPN$K_TAG_NETMASK,	/* in_addr	*/
-	SVPN$K_TAG_CLIADDR,	/* in_addr	*/
-	SVPN$K_TAG_IDLE,	/* WORD		*/
-	SVPN$K_TAG_PING,	/* WORD		*/
-	SVPN$K_TAG_RETRY,	/* WORD		*/
-	SVPN$K_TAG_TOTAL,	/* WORD		*/
-	SVPN$K_TAG_ENC,		/* OCTET	*/
-	SVPN$K_TAG_TRACE,	/* OCTET	*/
-	SVPN$K_TAG_MSG,		/* BBLOCK/ASCII	*/
-	SVPN$K_TAG_USER,	/* BBLOCK/ASCII	*/
-	SVPN$K_TAG_TIME,	/* timespec	*/
-	SVPN$K_TAG_SEQ,		/* LONGWORD	*/
-	SVPN$K_TAG_REV,		/* BBLOCK/ASCII	*/
-	SVPN$K_TAG_TUNTYPE	/* WORD		*/
+	SVPN$K_STATECTL,			/* VPN State - waiting for remote/peer initial request */
+	SVPN$K_STATEON,				/* New session has been etsablished	*/
+	SVPN$K_STATETUN,			/* In data tunneling mode	*/
+	SVPN$K_STATEOFF				/* Data channel is need to be closed */
 };
 
 
-enum	{
-	SVPN$K_STATECTL,	/* VPN State - waiting for remote/peer initial request */
-	SVPN$K_STATEON,		/* New session has been etsablished	*/
-	SVPN$K_STATETUN,	/* In data tunneling mode	*/
-	SVPN$K_STATEOFF		/* Data channel is need to be closed */
-};
-
-
-enum	{			/* Signaling channel requests */
+enum	{					/* Signaling channel requests */
 	SVPN$K_REQ_NOPE = 0,
 
 	SVPN$K_REQ_LOGIN,
@@ -105,15 +112,12 @@ enum	{			/* Signaling channel requests */
 
 #define	SVPN$SZ_MAGIC	8
 #define	SVPN$T_MAGIC	"StarLet"
-#define	SVPN$SZ_DIGEST	20	/* SHA1 size	*/
-
-
+#define	SVPN$SZ_DIGEST	20			/* SHA1 size	*/
 
 
 typedef struct	__svpn_vstat__
 	{
-	struct timespec delta,
-			rtt;
+	struct timespec rtt;
 
 	unsigned long long
 		bnetrd,
@@ -124,6 +128,34 @@ typedef struct	__svpn_vstat__
 } SVPN_VSTAT;
 
 
+/* Structue of record in the STAT file */
+typedef struct	__svpn_stat_rec__
+	{
+	struct tm	tmrec;
+
+	unsigned long long
+		btunrd,				/* Octets counters	*/
+		btunwr,
+		bnetrd,
+		bnetwr,
+
+		ptunrd,				/* Packets counters	*/
+		ptunwr,
+		pnetrd,
+		pnetwr;
+
+	struct  timespec ts;
+} SVPN_STAT_REC;
+
+
+/*
+ *	Definitions of the element uses in the network interchange
+ *
+ *	|<-------- PDU   ----------------->|
+ *	+---------+---------+    +---------+
+ *	| HDR     | TLV 1   | ...| TLV N   |
+ *	+---------+---------+    +---------+
+*/
 typedef struct	__svpn_pdu
 	{
 	union {
@@ -131,11 +163,11 @@ typedef struct	__svpn_pdu
 	unsigned long long magic64;
 	};
 
-	unsigned char	proto,		/* Protocol version	*/
-			req,		/* Request type		*/
+	unsigned char	proto,			/* Protocol version	*/
+			req,			/* Request type		*/
 			digest[SVPN$SZ_DIGEST];	/* SHA1		*/
 
-	unsigned char	data[0];	/* Placeholder for payload of the PDU */
+	unsigned char	data[0];		/* Placeholder for payload of the PDU */
 } SVPN_PDU;
 
 
@@ -157,11 +189,11 @@ typedef struct	__svpn_tlv
 
 
 enum	{
-	SVPN$K_BBLOCK = 0,		/* Octets block			*/
-	SVPN$K_WORD,			/* 16-bits unsigned word	*/
-	SVPN$K_LONG,			/* 32-bit unsigned longword	*/
-	SVPN$K_QUAD,			/* 64-bit unsigned long longword*/
-	SVPN$K_IP			/* IP4 or IP6 address		*/
+	SVPN$K_BBLOCK = 0,			/* Octets block			*/
+	SVPN$K_WORD,				/* 16-bits unsigned word	*/
+	SVPN$K_LONG,				/* 32-bit unsigned longword	*/
+	SVPN$K_QUAD,				/* 64-bit unsigned long longword*/
+	SVPN$K_IP				/* IP4 or IP6 address		*/
 };
 
 

@@ -4,10 +4,10 @@
 #set -v
 
 
-COPTS="-fPIC -I ../ -D_DEBUG=1 -D__TRACE__=1 -pthread -static"
+COPTS="-fPIC -I ../ -D_DEBUG=1 -D__TRACE__=1 -pthread -static -latomic"
 # -static-libgcc
 
-#COPTS="-I ../ -pthread -static"
+#COPTS="-I ../ -pthread -static -latomic"
 SRCS="svpn_client.c ../svpn_common.c ../sha1.c ../utility_routines.c"
 EXE="svpn_client"
 
@@ -21,5 +21,6 @@ build	()
 	build	"arm-linux-gnueabihf-"		"ARMhf"
 	#build	"arm-linux-gnueabi-"		"ARMel"
 	#build	"mips-linux-gnu-"		"MIPS32"
-	#build	"mipsel-linux-gnu-"		"MIPSel"
 	build	""				"x86_64"
+	build	"mipsel-linux-gnu-"		"MIPSel"
+	build	"mips-linux-gnu-"		"MIPS"

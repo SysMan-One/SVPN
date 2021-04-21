@@ -21,5 +21,5 @@ build	()
 	build	"arm-linux-gnueabihf-"		"ARMhf"
 	#build	"arm-linux-gnueabi-"		"ARMel"
 	#build	"mips-linux-gnu-"		"MIPS32"
-	#build	"mipsel-linux-gnu-"		"MIPSel"
+	build	"mipsel-linux-gnu-"		"MIPSel"
 	build	""				"x86_64"
