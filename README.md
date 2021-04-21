@@ -1,3 +1,3 @@
-# SVPN - An yet another VPN service base on using TUN/TAP driver
+# SVPN - An yet another VPN service based on using TUN/TAP driver
 
 
