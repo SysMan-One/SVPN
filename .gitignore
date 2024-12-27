@@ -1,0 +1,5 @@
+build/
+legacy
+*.pro
+*.txt.user
+*.pro.user

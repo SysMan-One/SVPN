@@ -1,12 +1,6 @@
 #ifndef	__SVPN$DEF__
 #define	__SVPN$DEF__	1
 
-#ifdef	__GNUC__
-	#pragma GCC diagnostic ignored  "-Wparentheses"
-	#pragma	GCC diagnostic ignored	"-Wdate-time"
-	#pragma	GCC diagnostic ignored	"-Wunused-variable"
-#endif
-
 
 #ifdef _WIN32
 	#pragma once
@@ -204,8 +198,11 @@ enum	{
 #define	TAG$M_ID	(~(TAG$M_TYPE))
 
 
-int	tlv_get (void *buf, int bufsz, unsigned v_tag, unsigned *v_type, void *val, unsigned *valsz);
-int	tlv_put (void *buf, unsigned bufsz, unsigned v_tag, unsigned v_type, void *val, unsigned valsz, unsigned *adjlen);
+int	tlv_get (const void *a_buf, int a_bufsz, unsigned a_v_tag, unsigned *a_v_type, void *a_val, int *a_valsz);
+int	tlv_put (void *a_buf, unsigned a_bufsz, unsigned a_v_tag, unsigned a_v_type, const void *a_val, unsigned a_valsz, int *a_adjlen);
+void	tlv_dump (const void *a_buf, unsigned a_bufsz);
+
+
 
 
 /**

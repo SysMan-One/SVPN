@@ -2,12 +2,6 @@
 #define	__IDENT__	"V.01-01ECO1"
 #define	__REV__		"1.01.1"
 
-#ifdef	__GNUC__
-	#pragma GCC diagnostic ignored  "-Wparentheses"
-	#pragma	GCC diagnostic ignored	"-Wunused-variable"
-	#pragma	GCC diagnostic ignored	"-Wmissing-braces"
-	#pragma	GCC diagnostic ignored	"-Wdiscarded-qualifiers"
-#endif
 
 
 /*++
@@ -396,7 +390,7 @@ const char t4hdr [] =	"sVPN - Tunnel statistic," CRLF \
 			"%llu, %llu, " \
 			"%llu, %llu, %llu " CRLF;
 
-const OPTS optstbl [] =				/* Configuration options		*/
+static OPTS optstbl [] =				/* Configuration options		*/
 {
 	{$ASCINI("config"),	&g_confspec, ASC$K_SZ,	OPTS$K_CONF},		/* File spec of the configuration file */
 	{$ASCINI("trace"),	&g_trace, 0,		OPTS$K_OPT},		/* Extensible diagnostic output	*/
@@ -912,7 +906,10 @@ void	stat_update	(void)
  * subtracting out new words), and "cksum"
  * is the checksum value to be updated.
  */
-static inline unsigned short adjust_checksum	(int acc, unsigned short csum)
+static inline unsigned short adjust_checksum	(
+		int acc,
+		unsigned short csum
+		)
 {
 int _acc = acc;
 
@@ -936,7 +933,7 @@ int _acc = acc;
 
 
 void	mss_fixup_dowork (
-			char	*buf,
+			void	*buf,
 			int	bufsz,
 		unsigned short	maxmss
 			)
@@ -1057,7 +1054,7 @@ struct	tcphdr	*tcph;
 	if ( bufsz < sizeof(struct ip6_hdr) )
 		return;
 
-	iph = (struct iphdr *) buf;
+	iph = (struct ip6_hdr *) buf;
 
 	/* do we have the full IPv6 packet?
 	* "payload_len" does not include IPv6 header (+40 bytes)
@@ -1088,7 +1085,7 @@ struct	tcphdr	*tcph;
 
 
 static inline void	mss_fixup (
-		char	*buf,
+		void	*buf,
 		int	 bufsz,
 	unsigned short	 maxmss
 			)
@@ -1123,10 +1120,6 @@ struct iphdr	*iph = (struct iphdr *) buf;
  *	condition code
  *
  */
-
-
-
-
 static int	udp_init(
 		int	*sd
 			)
@@ -1489,7 +1482,7 @@ int	slen = sizeof(struct sockaddr_in);
 			continue;
 
 		/* Retrieve data from socket buffer	*/
-		if ( 0 < (status = recvfrom(sd, bufp, bufsz, 0, &rsock, &slen)) )
+		if ( 0 < (status = recvfrom(sd, bufp, bufsz, 0, (struct sockaddr *) &rsock, &slen)) )
 			{
 			/* Optionaly check source address of sender */
 			if ( (from->sin_addr.s_addr != INADDR_ANY) && (from->sin_addr.s_addr != rsock.sin_addr.s_addr) )
@@ -1613,7 +1606,7 @@ char	*bufp = (char *) buf;
 #ifdef WIN32
 		if ( bufsz == (status = send(sd, bufp, bufsz, 0)) )
 #else
-		if ( bufsz == (status = sendto (sd, bufp, bufsz, MSG_NOSIGNAL, to , slen)) )
+		if ( bufsz == (status = sendto (sd, bufp, bufsz, MSG_NOSIGNAL, (struct sockaddr *) to , slen)) )
 #endif
 			return	STS$K_SUCCESS; /* Bingo! We has been sent a requested amount of data */
 
@@ -1777,7 +1770,7 @@ struct	timespec now = {0}, etime = {0}, delta = {13, 0};
 struct iphdr *iph;
 
 	/* Place of the IP's Header in the network packet depending on TUN's mode */
-	iph = (g_tunflags & IFF_TAP) ? &buf[ETH_HLEN] : buf;
+	iph = (struct iphdr *) ((g_tunflags & IFF_TAP) ? &buf[ETH_HLEN] : buf);
 
 
 	/* Open channel to TUN device */
@@ -1856,7 +1849,7 @@ struct iphdr *iph;
 		/* Retrieve data from UDP socket -> send to TUN device	*/
 		slen = sizeof(struct sockaddr_in);
 
-		if ( (pfd[0].revents & POLLIN) && (0 < (rc = recvfrom(g_udp_sd, buf, sizeof(buf), 0, &rsock, &slen))) )
+		if ( (pfd[0].revents & POLLIN) && (0 < (rc = recvfrom(g_udp_sd, buf, sizeof(buf), 0, (struct sockaddr *)&rsock, &slen))) )
 			{
 			/* Special check for unordered LOGIN, or LOGIN from a yet another client */
 			if ( (pdu->magic64 == *magic64) && (pdu->req == SVPN$K_REQ_LOGIN) )
@@ -1957,7 +1950,7 @@ struct iphdr *iph;
 			if ( g_enc != SVPN$K_ENC_NONE )
 				encode(g_enc, buf, rc, g_key, sizeof(g_key));
 
-			if ( rc != sendto(g_udp_sd, buf, rc, 0, &g_client_sk, sizeof(struct sockaddr_in)) )
+			if ( rc != sendto(g_udp_sd, buf, rc, 0, (struct sockaddr *) &g_client_sk, sizeof(struct sockaddr_in)) )
 				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on UDP socket, sendto(%d octets), errno=%d", td, g_udp_sd, rc, errno);
 
 			/* Adjust statistic counters ... */
@@ -2303,6 +2296,7 @@ struct option stat_opts[] = {
  *   OUTPUT:
  *	NONE
  */
+typedef void *(* pthread_func_t) (void *);
 
 int	main	(int argc, char **argv)
 {
@@ -2357,7 +2351,7 @@ struct timespec deltaonline = {0, 0}, now;
 	/* Create crew workers */
 	for ( int i = 0; i < g_threads; i++ )
 		{
-		if ( status = pthread_create(&tid, NULL, worker, NULL) )
+		if ( status = pthread_create(&tid, NULL, (pthread_func_t) worker, NULL) )
 			return	$LOG(STS$K_FATAL, "Cannot start worker thread, pthread_create()->%d, errno=%d", status, errno);
 		}
 

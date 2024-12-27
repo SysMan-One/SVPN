@@ -1,0 +1,3 @@
+[submodule "3rdparty/utility_routines"]
+	path = 3rdparty/utility_routines
+	url = https://gitlab.com/SysMan-One/utility_routines

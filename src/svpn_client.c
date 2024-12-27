@@ -2,12 +2,6 @@
 #define	__IDENT__	"V.01-00"
 #define	__REV__		"1.00.0"
 
-#ifdef	__GNUC__
-	#pragma GCC diagnostic ignored  "-Wparentheses"
-	#pragma	GCC diagnostic ignored	"-Wunused-variable"
-	#pragma	GCC diagnostic ignored	"-Wmissing-braces"
-#endif
-
 
 /*++
 **
@@ -284,6 +278,9 @@ const OPTS optstbl [] =		/* Configuration options		*/
 };
 
 
+
+extern void	tlv_dump (const void *buf, unsigned bufsz);
+
 const char	help [] = { "Usage:\n" \
 	"$ %s [<options_list>]\n\n" \
 	"\t/CONFIG=<file>    configuration options file path\n" \
@@ -371,10 +368,10 @@ struct  sockaddr_in a = {0};
 	/* It looks like that local UDP port will be allocated on first send,
 	 * so just send something to somwhere ...
 	 */
-	sendto(*sd, ia, sizeof(ia), 0, &a, slen);
+	sendto(*sd, ia, sizeof(ia), 0, (struct sockaddr *)&a, slen);
 
 	status = sizeof(struct sockaddr);
-	if ( 0 > (status = getsockname (*sd, &a,  (socklen_t *) &status)) )
+	if ( 0 > (status = getsockname (*sd, (struct sockaddr *) &a,  (socklen_t *) &status)) )
 		$LOG(STS$K_ERROR, "getsockname(#%d)->%d, errno=%d", sd, status, __ba_errno__);
 
 	inet_ntop(AF_INET, &a.sin_addr, ia, sizeof(ia));
@@ -692,7 +689,7 @@ int	slen = sizeof(struct sockaddr_in);
 			continue;
 
 		/* Retrieve data from socket buffer	*/
-		if ( 0 < (status = recvfrom(sd, bufp, bufsz, 0, &rsock, &slen)) )
+		if ( 0 < (status = recvfrom(sd, bufp, bufsz, 0, (struct sockaddr *)&rsock, &slen)) )
 			{
 			/* Optionaly check source address of sender */
 			if ( (from->sin_addr.s_addr != INADDR_ANY) && (from->sin_addr.s_addr != rsock.sin_addr.s_addr) )
@@ -808,7 +805,7 @@ char	*bufp = (char *) buf;
 #ifdef WIN32
 		if ( bufsz == (status = send(sd, bufp, bufsz, 0)) )
 #else
-		if ( bufsz == (status = sendto (sd, bufp, bufsz, MSG_NOSIGNAL, to , slen)) )
+		if ( bufsz == (status = sendto (sd, bufp, bufsz, MSG_NOSIGNAL, (struct sockaddr *) to , slen)) )
 #endif
 			return	STS$K_SUCCESS; /* Bingo! We has been sent a requested amount of data */
 
@@ -1205,33 +1202,35 @@ struct iphdr	*iph;
 
 
 
+enum { SVPN$K_NET_FD = 0, SVPN$K_TUN_FD, SVPN$K_MAX_FD};
 
-static int	worker	(void)
+static int	s_worker	(void *a_arg)
 {
-int	rc = 0, td = -1,  slen = sizeof(struct sockaddr_in);
-#ifdef WIN32
-WSAPOLLFD  pfd[] = {{g_udp_sd, POLLIN,0 }, {0, POLLIN, 0}};
-#else
-struct pollfd pfd[] = {{g_udp_sd, POLLIN, 0 }, {td, POLLIN, 0}};
-#endif // WIN32
-struct timespec	now, etime;
-char	buf [SVPN$SZ_IOBUF];
-SVPN_PDU *pdu = (SVPN_PDU *) buf;
 
-struct	sockaddr_in rsock = {0};
+int	l_rc = 0, l_tun_fd = -1,  l_slen = sizeof(struct sockaddr_in);
+#ifdef WIN32
+WSAPOLLFD  l_pfd[SVPN$K_MAX_FD] = {{g_udp_sd, POLLIN,0 }, {0, POLLIN, 0}};
+#else
+struct pollfd l_pfd[SVPN$K_MAX_FD] = {{g_udp_sd, POLLIN, 0 }, {l_tun_fd, POLLIN, 0}};
+#endif // WIN32
+struct timespec	l_now, l_etime;
+char	l_buf [SVPN$SZ_IOBUF];
+SVPN_PDU *l_pdu = (SVPN_PDU *) l_buf;
+
+struct	sockaddr_in l_rsock = {0};
 
 	$LOG(STS$K_INFO, "Starting ...");
 
 	/* Open channel to TUN device */
-	if ( !(1 & (rc = tun_open(&td))) )
+	if ( !(1 & (l_rc = tun_open(&l_tun_fd))) )
 		return	g_exit_flag = $LOG(STS$K_ERROR, "Error allocating TUN device");
 
 	/* We suppose to be use poll() on the TUN and UDP channels to performs
 	 * I/O asyncronously
 	 */
-	pfd[1].fd = td;
+	l_pfd[SVPN$K_TUN_FD].fd = l_tun_fd;
 
-	$LOG(STS$K_INFO, "[#%d-#%d]Main loop ...", td, g_udp_sd);
+	$LOG(STS$K_INFO, "[#%d-#%d]Main loop ...", l_tun_fd, g_udp_sd);
 
 	for  ( ; !g_exit_flag; )
 		{
@@ -1243,18 +1242,18 @@ struct	sockaddr_in rsock = {0};
 
 		if ( g_state != SVPN$K_STATETUN )
 			{
-			if ( rc = clock_gettime(CLOCK_REALTIME, &now) )
-				g_exit_flag = $LOG(STS$K_ERROR, "[#%d]clock_gettime()->%d, errno=%d", td, rc, errno);
+			if ( l_rc = clock_gettime(CLOCK_REALTIME, &l_now) )
+				g_exit_flag = $LOG(STS$K_ERROR, "[#%d]clock_gettime()->%d, errno=%d", l_tun_fd, l_rc, errno);
 
-			__util$add_time(&now, &g_timers_set.t_ping, &etime);
+			__util$add_time(&l_now, &g_timers_set.t_ping, &l_etime);
 
 			pthread_mutex_lock(&crew_mtx);
-			rc = pthread_cond_timedwait(&crea_cond, &crew_mtx, &etime);
+			l_rc = pthread_cond_timedwait(&crea_cond, &crew_mtx, &l_etime);
 			pthread_mutex_unlock(&crew_mtx);
 
-			if ( rc && (rc != ETIMEDOUT) )
+			if ( l_rc && (l_rc != ETIMEDOUT) )
 				{
-				g_exit_flag = $LOG(STS$K_ERROR, "[#%d]pthread_cond_timedwait()->%d, errno=%d", td, rc, errno);
+				g_exit_flag = $LOG(STS$K_ERROR, "[#%d]pthread_cond_timedwait()->%d, errno=%d", l_tun_fd, l_rc, errno);
 				break;
 				}
 
@@ -1262,7 +1261,7 @@ struct	sockaddr_in rsock = {0};
 			if ( g_state != SVPN$K_STATETUN )
 				continue;
 
-			$IFTRACE(g_trace, "[#%d]Got wake-up signal, unsleep worker !", td);
+			$IFTRACE(g_trace, "[#%d]Got wake-up signal, unsleep worker !", l_tun_fd);
 			}
 
 
@@ -1271,50 +1270,50 @@ struct	sockaddr_in rsock = {0};
 #ifdef WIN32
 		if( 0 >  (rc = WSAPoll(pfd, 2, timespec2msec (delta))) && (__ba_errno__ != WSAEINTR) )
 #else
-		if( 0 >  (rc = poll(pfd, 2, timespec2msec (&g_timers_set.t_io))) && (__ba_errno__ != EINTR) )
+		if( 0 >  (l_rc = poll(l_pfd, SVPN$K_MAX_FD, timespec2msec (&g_timers_set.t_io))) && (__ba_errno__ != EINTR) )
 #endif // WIN32
-			return	$LOG(STS$K_ERROR, "[#%d-#%d]poll()->%d, errno=%d", td, g_udp_sd, rc, __ba_errno__);
+			return	$LOG(STS$K_ERROR, "[#%d-#%d]poll()->%d, errno=%d", l_tun_fd, g_udp_sd, l_rc, __ba_errno__);
 
 
-		if ( !rc )	/* Nothing to do */
+		if ( !l_rc )	/* Nothing to do */
 			continue;
 
 
 #ifdef WIN32
 		if ( (rc < 0) && (__ba_errno__ == WSAEINTR) )
 #else
-		if ( (rc < 0) && (__ba_errno__ == EINTR) )
+		if ( (l_rc < 0) && (__ba_errno__ == EINTR) )
 #endif
 			{
-			$LOG(STS$K_WARN, "[#%d-#%d]poll()->%d, errno=%d", td, g_udp_sd, rc, __ba_errno__);
+			$LOG(STS$K_WARN, "[#%d-#%d]poll()->%d, errno=%d", l_tun_fd, g_udp_sd, l_rc, __ba_errno__);
 			continue;
 			}
 
 
 
-		if ( pfd[0].revents & (~POLLIN) || pfd[1].revents & (~POLLIN) )	/* Unexpected events ?!			*/
+		if ( l_pfd[SVPN$K_NET_FD].revents & (~POLLIN) || l_pfd[SVPN$K_TUN_FD].revents & (~POLLIN) )	/* Unexpected events ?!			*/
 			return	$LOG(STS$K_ERROR, "[#%d] poll()->%d, UDP/TUN.revents=%08x/%08x, errno=%d",
-					td, g_udp_sd, rc, pfd[0].revents, pfd[1].revents, __ba_errno__);
+					l_tun_fd, g_udp_sd, l_rc, l_pfd[0].revents, l_pfd[1].revents, __ba_errno__);
 
 		/* Retrieve data from UDP socket -> send to TUN device	*/
-		slen = sizeof(struct sockaddr_in);
-		if ( (pfd[0].revents & POLLIN) && (0 < (rc = recvfrom(g_udp_sd, buf, sizeof(buf), 0, &rsock, &slen))) )
+		l_slen = sizeof(struct sockaddr_in);
+		if ( (l_pfd[SVPN$K_NET_FD].revents & POLLIN) && (0 < (l_rc = recvfrom(g_udp_sd, l_buf, sizeof(l_buf), 0, (struct sockaddr *) &l_rsock, &l_slen))) )
 			{
 			/* Check sender IP, ignore unrelated packets ... */
-			if ( g_server_sk.sin_addr.s_addr != rsock.sin_addr.s_addr )
+			if ( g_server_sk.sin_addr.s_addr != l_rsock.sin_addr.s_addr )
 				continue;
 
 			atomic_fetch_add(&g_input_count, 1);
 
 			/* Is it's control packet begined with the magic prefix  ? */
-			if ( pdu->magic64 == *magic64 )
+			if ( l_pdu->magic64 == *magic64 )
 				{
-				$IFTRACE(g_trace, "Got control packet, req=%d, %d octets", pdu->req, rc);
+				$IFTRACE(g_trace, "Got control packet, req=%d, %d octets", l_pdu->req, l_rc);
 
-				switch ( pdu->req )
+				switch ( l_pdu->req )
 					{
 					case	SVPN$K_REQ_PING:
-						do_pong (g_udp_sd, &g_server_sk, pdu, rc);
+						do_pong (g_udp_sd, &g_server_sk, l_pdu, l_rc);
 						break;
 
 					case	SVPN$K_REQ_LOGOUT:
@@ -1333,14 +1332,14 @@ struct	sockaddr_in rsock = {0};
 
 
 			if ( g_enc != SVPN$K_ENC_NONE )
-				decode(g_enc, buf, rc, g_key, sizeof(g_key));
+				decode(g_enc, l_buf, l_rc, g_key, sizeof(g_key));
 
 			/* If aggregation option is take place we need to retrieve frame/IP-packet from datagrame */
 
 			if ( SVPN$K_OPT_AGGR & g_run_options )
-				__multiple_write(td, buf, rc);
-			else if ( rc != write(td, buf, rc) )
-				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on TUN device, write(%d octets), errno=%d", td, g_udp_sd, rc, __ba_errno__);
+				__multiple_write(l_tun_fd, l_buf, l_rc);
+			else if ( l_rc != write(l_tun_fd, l_buf, l_rc) )
+				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on TUN device, write(%d octets), errno=%d", l_tun_fd, g_udp_sd, l_rc, __ba_errno__);
 
 			//$IFTRACE(g_trace, "TUN WR: %d octets", rc);
 			}
@@ -1348,28 +1347,28 @@ struct	sockaddr_in rsock = {0};
 #ifdef WIN32
 		if ( (0 >= status) && (errno != WSAEINPROGRESS) )
 #else
-		if ( (0 >= rc) && (errno != EINPROGRESS) )
+		if ( (0 >= l_rc) && (errno != EINPROGRESS) )
 #endif
 			{
 			$LOG(STS$K_ERROR, "[#%d-#%d]recv()->%d, UDP/TUN.revents=%08x/%08x, errno=%d",
-					td, g_udp_sd, rc, pfd[0].revents, pfd[1].revents, __ba_errno__);
+					l_tun_fd, g_udp_sd, l_rc, l_pfd[0].revents, l_pfd[1].revents, __ba_errno__);
 			break;
 			}
 
 
 		/* Retrieve data from TUN device -> send to UDP socket */
-		if ( (pfd[1].revents & POLLIN) && (0 < (rc = read (td, buf, sizeof(buf)))) )
+		if ( (l_pfd[SVPN$K_TUN_FD].revents & POLLIN) && (0 < (l_rc = read (l_tun_fd, l_buf, sizeof(l_buf)))) )
 			{
-			slen = sizeof(struct sockaddr_in);
+			l_slen = sizeof(struct sockaddr_in);
 
 
 			//$IFTRACE(g_trace, "TUN RD: %d octets", rc);
 
 			if ( g_enc != SVPN$K_ENC_NONE )
-				encode(g_enc, buf, rc, g_key, sizeof(g_key));
+				encode(g_enc, l_buf, l_rc, g_key, sizeof(g_key));
 
-			if ( rc != sendto(g_udp_sd, buf, rc, 0, &g_server_sk, slen) )
-				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on UDP socket, sendto(%d octets), errno=%d", td, g_udp_sd, rc, errno);
+			if ( l_rc != sendto(g_udp_sd, l_buf, l_rc, 0, (struct sockaddr *) &g_server_sk, l_slen) )
+				$LOG(STS$K_ERROR, "[#%d-#%d]I/O error on UDP socket, sendto(%d octets), errno=%d", l_tun_fd, g_udp_sd, l_rc, errno);
 
 
 			//$IFTRACE(g_trace, "UDP WR: %d octets", rc);
@@ -1378,10 +1377,10 @@ struct	sockaddr_in rsock = {0};
 #ifdef WIN32
 		if ( (0 >= status) && (errno != WSAEINPROGRESS) )
 #else
-		if ( (0 >= rc) && (errno != EINPROGRESS) )
+		if ( (0 >= l_rc) && (errno != EINPROGRESS) )
 #endif
 			$LOG(STS$K_ERROR, "[#%d-#%d]recv()->%d, UDP/TUN.revents=%08x/%08x, errno=%d",
-					td, g_udp_sd, rc, pfd[0].revents, pfd[1].revents, __ba_errno__);
+					l_tun_fd, g_udp_sd, l_rc, l_pfd[0].revents, l_pfd[1].revents, __ba_errno__);
 		}
 
 
@@ -1401,6 +1400,7 @@ struct	sockaddr_in rsock = {0};
  *   OUTPUT:
  *	NONE
  */
+typedef void *(* pthread_func_t) (void *);
 
 int	main	(int argc, char **argv)
 {
@@ -1462,7 +1462,7 @@ pthread_t	tid;
 	/* Create crew workers */
 	for ( int i = 0; i < g_threads; i++ )
 		{
-		if ( status = pthread_create(&tid, NULL, worker, NULL) )
+		if ( status = pthread_create(&tid, NULL, (pthread_func_t)  s_worker, NULL) )
 			return	$LOG(STS$K_FATAL, "Cannot start worker thread, pthread_create()->%d, errno=%d", status, errno);
 		}
 

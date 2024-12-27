@@ -2,13 +2,6 @@
 #define	__IDENT__	"V.01-01"
 #define	__REV__		"1.00.1"
 
-#ifdef	__GNUC__
-	#pragma GCC diagnostic ignored  "-Wparentheses"
-	#pragma	GCC diagnostic ignored	"-Wunused-variable"
-	#pragma	GCC diagnostic ignored	"-Wmissing-braces"
-	#pragma	GCC diagnostic ignored	"-Wdiscarded-qualifiers"
-#endif
-
 /*++
 **
 **  FACILITY:  StarLet VPN - cross-platform VPN, light weight, high performance
@@ -431,7 +424,7 @@ static inline int	__fao_traffic	(
 		unsigned long long	count,
 			char		*out,
 			int		outsz,
-			char		*unit
+			const char	*unit
 				)
 {
 int	outlen = 0;
