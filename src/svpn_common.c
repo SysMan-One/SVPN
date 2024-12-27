@@ -26,11 +26,11 @@ extern	int	g_trace;
  *  DESCRIPTION: Encapsulate data into the TLV container in the given buffer
  *
  *  INPUT:
- *	a_buf:	buffer to accept TLV
+ *	a_buf:		buffer to accept TLV
  *	a_bufsz:	size of the buffer
  *	a_v_tag:	Tag Id of the value (application specific)
  *	a_v_type:	See TAG$K_* constants
- *	a_val:	An address of the value to be encapsulated into the TLV
+ *	a_val:		An address of the value to be encapsulated into the TLV
  *	a_valsz:	Actual size of the value, optional for fixed size 'a_val'
  *
  *  OUTPUT:

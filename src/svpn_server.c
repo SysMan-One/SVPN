@@ -338,8 +338,8 @@ static	SVPN_TIMERS	g_timers_set = { {7, 0}, {120, 0}, {13, 0}, {600, 0}, 3};
 						/* PTHREAD's stuff is supposed to be used to control worker's
 						* crew threads
 						*/
-static	pthread_mutex_t crew_mtx = PTHREAD_MUTEX_INITIALIZER;
-static	pthread_cond_t	crea_cond = PTHREAD_COND_INITIALIZER;
+static	pthread_mutex_t s_crew_mtx = PTHREAD_MUTEX_INITIALIZER;
+static	pthread_cond_t	s_crew_cond = PTHREAD_COND_INITIALIZER;
 
 
 typedef struct	__svpn_stat__
@@ -359,6 +359,7 @@ typedef struct	__svpn_stat__
 	struct  timespec ts;
 
 } SVPN_STAT;
+
 SVPN_STAT	g_stat = {0}, g_stat_zero = {0},
 		g_stlast1 = {0},		/* Keep stats for file */
 		g_stlast2 = {0};		/* Keep stats for volume */
@@ -416,7 +417,7 @@ static OPTS optstbl [] =				/* Configuration options		*/
 	{$ASCINI("stat"),	&q_fstat,ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("ipbacklog"),	&q_ipbacklog,ASC$K_SZ,	OPTS$K_STR},
 										/* Quota of volume traffic for the TUN */
-	{$ASCINI("data_volume_limit"),	&g_data_volume_limit, 0,		OPTS$K_INT},
+	{$ASCINI("data_volume_limit"), &g_data_volume_limit, 0, OPTS$K_INT},
 	{$ASCINI("modetun"),	&q_tunmode,ASC$K_SZ,	OPTS$K_STR},
 	{$ASCINI("deltastat"),	&g_deltastat,	0,	OPTS$K_INT},
 	{$ASCINI("t4stat"),	&q_t4stat, ASC$K_SZ,	OPTS$K_STR},			/* A file to keep statistic in T4 format */
@@ -1170,7 +1171,7 @@ socklen_t slen = sizeof(struct sockaddr);
 		}
 
 
-	return	$LOG(STS$K_SUCCESS, "[#%d]UDP socket is initialized %s:%d", *sd, ia, ntohs(g_server_sk.sin_port));
+	return	$LOG(STS$K_SUCCESS, "[#%d] UDP socket is initialized %s:%d", *sd, ia, ntohs(g_server_sk.sin_port));
 }
 
 
@@ -1461,7 +1462,7 @@ int	slen = sizeof(struct sockaddr_in);
 #else
 		if( (0 >  (status = poll(&pfd, 1, timespec2msec (delta)))) && (__ba_errno__ != EINTR) )
 #endif // WIN32
-			return	$LOG(STS$K_ERROR, "[#%d] poll()->%d, errno=%d", sd, status, __ba_errno__);
+			return	$LOG(STS$K_ERROR, "[#%d]  poll()->%d, errno=%d", sd, status, __ba_errno__);
 
 #ifdef WIN32
 		if ( (status < 0) && (__ba_errno__ == WSAEINTR) )
@@ -1469,13 +1470,13 @@ int	slen = sizeof(struct sockaddr_in);
 		if ( (status < 0) && (__ba_errno__ == EINTR) )
 #endif
 			{
-			$LOG(STS$K_WARN, "[#%d] poll()->%d, errno=%d", sd, status, __ba_errno__);
+			$LOG(STS$K_WARN, "[#%d]  poll()->%d, errno=%d", sd, status, __ba_errno__);
 			continue;
 			}
 
 
 		if ( pfd.revents & (~POLLIN) )	/* Unexpected events ?!			*/
-			return	$LOG(STS$K_ERROR, "[#%d] poll()->%d, .revents=%08x(%08x), errno=%d",
+			return	$LOG(STS$K_ERROR, "[#%d]  poll()->%d, .revents=%08x(%08x), errno=%d",
 					sd, status, pfd.revents, pfd.events, __ba_errno__);
 
 		if ( !(pfd.revents & POLLIN) )	/* Non-interesting event ?		*/
@@ -1504,13 +1505,13 @@ int	slen = sizeof(struct sockaddr_in);
 		if ( (0 >= status) && (errno != EINPROGRESS) )
 #endif
 			{
-			$LOG(STS$K_ERROR, "[#%d] recv()->%d, .revents=%08x(%08x), errno=%d",
+			$LOG(STS$K_ERROR, "[#%d]  recv()->%d, .revents=%08x(%08x), errno=%d",
 					sd, status, pfd.revents, pfd.events, __ba_errno__);
 			break;
 			}
 		}
 
-	return	$LOG(STS$K_ERROR, "[#%d] Did not get data from socket in %d msecs", sd, timespec2msec (delta));
+	return	$LOG(STS$K_ERROR, "[#%d]  Did not get data from socket in %d msecs", sd, timespec2msec (delta));
 }
 
 /*
@@ -1579,7 +1580,7 @@ char	*bufp = (char *) buf;
 #else
 		if( 0 >  (status = poll(&pfd, 1, 1000)) && (__ba_errno__ != EINTR) )
 #endif // WIN32
-			return	$LOG(STS$K_ERROR, "[#%d] poll()->%d, errno=%d", sd, status, __ba_errno__);
+			return	$LOG(STS$K_ERROR, "[#%d]  poll()->%d, errno=%d", sd, status, __ba_errno__);
 
 #ifdef WIN32
 		if ( (status < 0) && (__ba_errno__ == WSAEINTR) )
@@ -1587,7 +1588,7 @@ char	*bufp = (char *) buf;
 		if ( (status < 0) && (__ba_errno__ == EINTR) )
 #endif
 			{
-			$LOG(STS$K_WARN, "[#%d] poll()->%d, errno=%d", sd, status, __ba_errno__);
+			$LOG(STS$K_WARN, "[#%d]  poll()->%d, errno=%d", sd, status, __ba_errno__);
 			continue;
 			}
 
@@ -1596,7 +1597,7 @@ char	*bufp = (char *) buf;
 #else
 		if ( pfd.revents & (~POLLOUT) && (__ba_errno__ != EAGAIN) )	/* Unexpected events ?!			*/
 #endif
-			return	$LOG(STS$K_ERROR, "[#%d] poll()->%d, .revents=%08x(%08x), errno=%d",
+			return	$LOG(STS$K_ERROR, "[#%d]  poll()->%d, .revents=%08x(%08x), errno=%d",
 					sd, status, pfd.revents, pfd.events, __ba_errno__);
 
 		if ( !(pfd.revents & POLLOUT) )	/* No interesting event			*/
@@ -1612,12 +1613,12 @@ char	*bufp = (char *) buf;
 
 
 		/* Error !!! */
-		$LOG(STS$K_ERROR, "[#%d] send(%d octets)->%d, .revents=%08x(%08x), errno=%d",
+		$LOG(STS$K_ERROR, "[#%d]  send(%d octets)->%d, .revents=%08x(%08x), errno=%d",
 					sd, bufsz, status, pfd.revents, pfd.events, errno);
 		break;
 		}
 
-	return	$LOG(STS$K_ERROR, "[#%d] Did not send requested %d octets", sd, bufsz);
+	return	$LOG(STS$K_ERROR, "[#%d]  Did not send requested %d octets", sd, bufsz);
 }
 
 static	void	sig_handler (int signo)
@@ -1700,7 +1701,7 @@ SVPN_PDU pdu = {0};
 	pdu.proto = SVPN$K_PROTO_V1;
 
 	if ( !(1 & xmit_pkt (sd, &pdu, SVPN$SZ_PDUHDR, to)) )
-		return	$LOG(STS$K_ERROR, "[#%d]Error send LOGOUT", sd);
+		return	$LOG(STS$K_ERROR, "[#%d] Error send LOGOUT", sd);
 
 	return	STS$K_SUCCESS;
 }
@@ -1736,7 +1737,7 @@ char	lobuf[64];
 	if ( !(1 & (tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_TIME, &v_type, &rtt, &len))) )
 		$LOG(STS$K_WARN, "No attribute %#x", g_udp_sd, SVPN$K_TAG_TIME);
 
-	$IFTRACE(g_trace, "[#%d]Received PONG #%#x", g_udp_sd, inpseq);
+	$IFTRACE(g_trace, "[#%d] Received PONG #%#x", g_udp_sd, inpseq);
 
 	/* Check sequence */
 	if ( g_outseq - inpseq )
@@ -1794,18 +1795,18 @@ struct iphdr *iph;
 		if ( g_state != SVPN$K_STATETUN )
 			{
 			if ( rc = clock_gettime(CLOCK_REALTIME, &now) )
-				g_exit_flag = $LOG(STS$K_ERROR, "[#%d]clock_gettime()->%d, errno=%d", td, rc, errno);
+				g_exit_flag = $LOG(STS$K_ERROR, "[#%d] clock_gettime()->%d, errno=%d", td, rc, errno);
 
 			__util$add_time(&now, &delta, &etime);
 
-			pthread_mutex_lock(&crew_mtx);
-			rc = pthread_cond_timedwait(&crea_cond, &crew_mtx, &etime);
-			pthread_mutex_unlock(&crew_mtx);
+			pthread_mutex_lock(&s_crew_mtx);
+			rc = pthread_cond_timedwait(&s_crew_cond, &s_crew_mtx, &etime);
+			pthread_mutex_unlock(&s_crew_mtx);
 
 
 			if ( rc && (rc != ETIMEDOUT) )
 				{
-				g_exit_flag = $LOG(STS$K_ERROR, "[#%d]pthread_cond_timedwait()->%d, errno=%d", td, rc, errno);
+				g_exit_flag = $LOG(STS$K_ERROR, "[#%d] pthread_cond_timedwait()->%d, errno=%d", td, rc, errno);
 				break;
 				}
 
@@ -1813,7 +1814,7 @@ struct iphdr *iph;
 			if ( g_state != SVPN$K_STATETUN )
 				continue;
 
-			$IFTRACE(g_trace, "[#%d]Got wake-up signal, unsleep worker !", td);
+			$IFTRACE(g_trace, "[#%d] Got wake-up signal, unsleep worker !", td);
 			}
 
 
@@ -1843,7 +1844,7 @@ struct iphdr *iph;
 
 
 		if ( pfd[0].revents & (~POLLIN) || pfd[1].revents & (~POLLIN) )	/* Unexpected events ?!			*/
-			return	$LOG(STS$K_ERROR, "[#%d] poll()->%d, UDP/TUN.revents=%08x/%08x, errno=%d",
+			return	$LOG(STS$K_ERROR, "[#%d]  poll()->%d, UDP/TUN.revents=%08x/%08x, errno=%d",
 					td, g_udp_sd, rc, pfd[0].revents, pfd[1].revents, __ba_errno__);
 
 		/* Retrieve data from UDP socket -> send to TUN device	*/
@@ -1855,7 +1856,7 @@ struct iphdr *iph;
 			if ( (pdu->magic64 == *magic64) && (pdu->req == SVPN$K_REQ_LOGIN) )
 				{
 				inet_ntop(AF_INET, &rsock.sin_addr, sfrom, sizeof(sfrom));
-				$LOG(STS$K_ERROR, "[#%d]Ignore LOGIN request from %s:%d, multiple sessions is not supported", g_udp_sd, sfrom, ntohs(rsock.sin_port));
+				$LOG(STS$K_ERROR, "[#%d] Ignore LOGIN request from %s:%d, multiple sessions is not supported", g_udp_sd, sfrom, ntohs(rsock.sin_port));
 
 				continue;	/* Skip rest of processing! */
 				}
@@ -2001,7 +2002,7 @@ va_list ap;
 }
 
 
-static inline	int	hmac_check	(
+static inline	int	s_hmac_check	(
 			void	*dst,
 			int	 dstsz,
 				...
@@ -2037,7 +2038,7 @@ va_list ap;
  *
  *   IMPLICITE OUTPUT
  */
-static int	control	(void)
+static int	s_control	(void)
 {
 int	status, bufsz, adjlen = 0, buflen = 0, v_type = 0, ulen = 0, revlen = 0;
 char	buf[SVPN$SZ_IOBUF], *bufp, sfrom[64] = {0}, user[SVPN$SZ_USER],
@@ -2050,13 +2051,13 @@ struct sockaddr_in from = {0};
 	from.sin_addr.s_addr = INADDR_ANY;
 
 	/* Wait for LOGIN from <USER> request ... */
-	$IFTRACE(g_trace, "[#%d]Wait for LOGIN from remote client ...", g_udp_sd);
+	$IFTRACE(g_trace, "[#%d] Wait for LOGIN from remote client ...", g_udp_sd);
 
 	if ( !(1 & recv_pkt (g_udp_sd, buf, sizeof(buf), &g_timers_set.t_max, &from, &buflen)) )
-		return	$LOG(STS$K_WARN, "[#%d]No LOGIN from remote client ...", g_udp_sd);
+		return	$LOG(STS$K_WARN, "[#%d] No LOGIN from remote client ...", g_udp_sd);
 
 	inet_ntop(AF_INET, &from.sin_addr, sfrom, sizeof(sfrom));
-	$IFTRACE(g_trace, "[#%d]Got request code %#x, from %s:%d, %d octets", g_udp_sd, pdu->req, sfrom, ntohs(from.sin_port), buflen);
+	$IFTRACE(g_trace, "[#%d] Got request code %#x, from %s:%d, %d octets", g_udp_sd, pdu->req, sfrom, ntohs(from.sin_port), buflen);
 
 
 	/* Check length and magic prefix of the packet, just drop unrelated packets */
@@ -2066,35 +2067,35 @@ struct sockaddr_in from = {0};
 		if ( g_trace )
 			{
 			revlen = __util$bin2hex(pdu, rev, buflen);
-			$IFTRACE(g_trace, "[#%d]Too short (%d < %d) or invalid preamble: [%.*s]", g_udp_sd, buflen, SVPN$SZ_PDUHDR, revlen, rev);
+			$IFTRACE(g_trace, "[#%d] Too short (%d < %d) or invalid preamble: [%.*s]", g_udp_sd, buflen, SVPN$SZ_PDUHDR, revlen, rev);
 			}
 
 		/* It's not alarm sitation, no message, just return corresponding condition */
-		return	STS$K_ERROR;	/* $LOG(STS$K_ERROR, "[#%d]Drop request code %#x, from %s:%d, %d octets", g_udp_sd, pdu->req, buflen); */
+		return	STS$K_ERROR;	/* $LOG(STS$K_ERROR, "[#%d] Drop request code %#x, from %s:%d, %d octets", g_udp_sd, pdu->req, buflen); */
 		}
 
 	if ( pdu->proto != SVPN$K_PROTO_V1  )
-		return	$LOG(STS$K_ERROR, "[#%d]Unsupported protocol version %d", g_udp_sd, pdu->proto);
+		return	$LOG(STS$K_ERROR, "[#%d] Unsupported protocol version %d", g_udp_sd, pdu->proto);
 
 	if ( pdu->req != SVPN$K_REQ_LOGIN )
-		return	$LOG(STS$K_ERROR, "[#%d]Ignored unhandled request from %s:%d, code=%#x", g_udp_sd, sfrom, ntohs(from.sin_port), pdu->req);
+		return	$LOG(STS$K_ERROR, "[#%d] Ignored unhandled request from %s:%d, code=%#x", g_udp_sd, sfrom, ntohs(from.sin_port), pdu->req);
 
 	/* Check  HMAC*/
-	if ( !(1 & hmac_check(pdu->digest, SVPN$SZ_DIGEST,
+	if ( !(1 & s_hmac_check(pdu->digest, SVPN$SZ_DIGEST,
 			pdu, SVPN$SZ_HASHED, pdu->data, buflen - SVPN$SZ_PDUHDR, $ASCPTR(&q_auth), $ASCLEN(&q_auth),
 				NULL /* End-of-arguments marger !*/)) )
-		return	$LOG(STS$K_ERROR, "[#%d]Autorization error", g_udp_sd);
+		return	$LOG(STS$K_ERROR, "[#%d] Autorization error", g_udp_sd);
 
 	ulen = sizeof(user);
 	if ( !(1 & tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_USER, &v_type, user, &ulen)) )
-		return	$LOG(STS$K_ERROR, "[#%d]No USERNAME in request", g_udp_sd);
+		return	$LOG(STS$K_ERROR, "[#%d] No USERNAME in request", g_udp_sd);
 
 	revlen = sizeof(rev);
 	if ( !(1 & tlv_get (pdu->data, buflen - SVPN$SZ_PDUHDR, SVPN$K_TAG_REV, &v_type, rev, &revlen)) )
-		$LOG(STS$K_WARN, "[#%d]No REVISION in request", g_udp_sd);
+		$LOG(STS$K_WARN, "[#%d] No REVISION in request", g_udp_sd);
 
 
-	$LOG(STS$K_INFO, "[#%d]Got LOGIN from  %.*s@%s:%d (%.*s), %d octets", g_udp_sd,
+	$LOG(STS$K_INFO, "[#%d] Got LOGIN from  %.*s@%s:%d (%.*s), %d octets", g_udp_sd,
 		 ulen, user, sfrom, ntohs(from.sin_port), revlen, rev, buflen);
 
 
@@ -2110,7 +2111,7 @@ struct sockaddr_in from = {0};
 	if ( $ASCLEN(&q_cliname) )
 		{
 		if ( !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_NAME, SVPN$K_BBLOCK, $ASCPTR(&q_cliname), $ASCLEN(&q_cliname), &adjlen))) )
-			return	$LOG(status, "[#%d]Error put attribute", g_udp_sd);
+			return	$LOG(status, "[#%d] Error put attribute", g_udp_sd);
 		buflen += adjlen;
 		bufsz -= adjlen;
 		}
@@ -2118,7 +2119,7 @@ struct sockaddr_in from = {0};
 	if ( $ASCLEN(&q_climsg) )
 		{
 		if (  !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_MSG, SVPN$K_BBLOCK, $ASCPTR(&q_climsg), $ASCLEN(&q_climsg), &adjlen))) )
-			return	$LOG(status, "[#%d]Error put attribute", g_udp_sd);
+			return	$LOG(status, "[#%d] Error put attribute", g_udp_sd);
 
 		buflen += adjlen;
 		bufsz -= adjlen;
@@ -2177,7 +2178,7 @@ struct sockaddr_in from = {0};
 	if ( !(1 & xmit_pkt (g_udp_sd, buf, buflen, &from)) )
 		return	$LOG(STS$K_ERROR, "Error send ACCEPT to %s:$d", sfrom, ntohs(from.sin_port));
 
-	$LOG(STS$K_SUCCESS, "[#%d]Sent ACCEPT to  %.*s@%s:%d, %d octets", g_udp_sd,
+	$LOG(STS$K_SUCCESS, "[#%d] Sent ACCEPT to  %.*s@%s:%d, %d octets", g_udp_sd,
 		 ulen, user, sfrom, ntohs(from.sin_port), buflen);
 
 	/* Store client IP for future use */
@@ -2199,7 +2200,7 @@ struct sockaddr_in from = {0};
  *
  *   IMPLICITE OUTPUT
  */
-static int	do_ping	(
+static int	s_do_ping	(
 				int	 sd,
 		struct	sockaddr_in	*to
 				)
@@ -2227,12 +2228,12 @@ struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC_RAW, &now);
 
 	if ( !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_TIME, SVPN$K_BBLOCK, &now, sizeof(now), &adjlen))) )
-		return	$LOG(status, "[#%d]Error put attribute", g_udp_sd);
+		return	$LOG(status, "[#%d] Error put attribute", g_udp_sd);
 	buflen += adjlen;
 	bufsz -= adjlen;
 
 	if ( !(1 & (status = tlv_put (&buf[buflen], bufsz, SVPN$K_TAG_SEQ, SVPN$K_LONG, &g_outseq, sizeof(g_outseq), &adjlen))) )
-		return	$LOG(status, "[#%d]Error put attribute", g_udp_sd);
+		return	$LOG(status, "[#%d] Error put attribute", g_udp_sd);
 	buflen += adjlen;
 	bufsz -= adjlen;
 
@@ -2240,9 +2241,9 @@ struct timespec now;
 		tlv_dump(pdu->data, buflen - SVPN$SZ_PDUHDR);
 
 	if ( !(1 & xmit_pkt (g_udp_sd, buf, buflen, to)) )
-		return	$LOG(STS$K_ERROR, "[#%d]Error send PING #%#x", g_udp_sd, g_outseq);
+		return	$LOG(STS$K_ERROR, "[#%d] Error send PING #%#x", g_udp_sd, g_outseq);
 
-	$IFTRACE(g_trace, "[#%d]Sent PING #%#x", g_udp_sd, g_outseq);
+	$IFTRACE(g_trace, "[#%d] Sent PING #%#x", g_udp_sd, g_outseq);
 
 	return	STS$K_SUCCESS;
 }
@@ -2366,7 +2367,7 @@ struct timespec deltaonline = {0, 0}, now;
 
 		if ( g_state == SVPN$K_STATECTL )
 			{
-			if ( 1 & control () )
+			if ( 1 & s_control () )
 				{
 				g_state = SVPN$K_STATEON;
 				$LOG(STS$K_INFO, "State is ON");
@@ -2403,9 +2404,9 @@ struct timespec deltaonline = {0, 0}, now;
 			$LOG(STS$K_INFO, "IP: %s is ONLINE", inet_ntop(AF_INET, &g_client_sk.sin_addr, buf, sizeof(buf)));
 
 			/* Send signal to the workers ... */
-			pthread_mutex_unlock (&crew_mtx);
-			status = pthread_cond_broadcast (&crea_cond);
-			pthread_mutex_unlock (&crew_mtx);
+			pthread_mutex_unlock (&s_crew_mtx);
+			status = pthread_cond_broadcast (&s_crew_cond);
+			pthread_mutex_unlock (&s_crew_mtx);
 			}
 
 
@@ -2441,7 +2442,7 @@ struct timespec deltaonline = {0, 0}, now;
 					}
 				else	{
 					$IFTRACE(g_trace, "No inputs from remote SVPN client, idle count is %d", idle_count);
-					do_ping(g_udp_sd, &g_client_sk);
+					s_do_ping(g_udp_sd, &g_client_sk);
 
 					if ( (g_outseq - g_inpseq) > 1 )
 						$LOG(STS$K_WARN, "Heartbeat lost detected (#%d/#%d)", (g_outseq - g_inpseq) - 1, g_timers_set.retry);
